@@ -36,7 +36,7 @@ This copies `hooks/`, `gates/` and a rewritten `config.json` into `your-repo/gua
 
     cd /path/to/your/repo && guardrails/tests/smoke.sh
 
-Six assertions against the installed policy. Wire the same command into CI and the protection is proven on every push, not just on the day it was installed.
+Eight assertions against the installed policy. Wire the same command into CI and the protection is proven on every push, not just on the day it was installed.
 
 ## Layout
 
