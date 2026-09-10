@@ -1,0 +1,114 @@
+{
+  "_comment": "All policy lives here. Gates contain logic only. Edit protected_paths for your repo (relative to this directory), keep read_only_verbs short, and add deny_patterns for commands that must never run from an agent. To reuse on another project: ./install.sh <repo>.",
+  "allowed_tree": ".",
+  "protected_paths": [
+    "protected"
+  ],
+  "read_only_verbs": [
+    "cat",
+    "less",
+    "more",
+    "head",
+    "tail",
+    "wc",
+    "file",
+    "stat",
+    "ls",
+    "du",
+    "grep",
+    "egrep",
+    "fgrep",
+    "rg",
+    "diff",
+    "cmp",
+    "md5",
+    "shasum",
+    "sha256sum",
+    "sort",
+    "uniq",
+    "cut",
+    "awk",
+    "echo",
+    "printf",
+    "pwd",
+    "basename",
+    "dirname",
+    "realpath",
+    "test",
+    "true",
+    "false"
+  ],
+  "find_write_flags": [
+    "-delete",
+    "-exec",
+    "-execdir",
+    "-ok",
+    "-okdir",
+    "-fprint",
+    "-fls"
+  ],
+  "path_keys": [
+    "file_path",
+    "notebook_path",
+    "path",
+    "filePath",
+    "notebookPath"
+  ],
+  "deliverable": {
+    "path": "deliverable/report.md",
+    "required_sections": [
+      "Findings",
+      "Evidence",
+      "Next steps"
+    ],
+    "min_section_chars": 40,
+    "min_distinct_chars": 8
+  },
+  "deny_patterns": [
+    {
+      "pattern": "\\bgit\\s+push\\b.*(--force\\b|--force-with-lease\\b|\\s-f\\b)",
+      "reason": "force push rewrites shared history"
+    },
+    {
+      "pattern": "\\bgit\\s+reset\\s+--hard\\b",
+      "reason": "git reset --hard discards uncommitted work"
+    },
+    {
+      "pattern": "\\bgit\\s+clean\\s+-[a-zA-Z]*f",
+      "reason": "git clean -f deletes untracked files"
+    },
+    {
+      "pattern": "\\bgit\\s+(checkout|restore)\\s+(--\\s+)?\\.(\\s|$)",
+      "reason": "discarding every local change in one command"
+    },
+    {
+      "pattern": "\\bgit\\s+branch\\s+-D\\b",
+      "reason": "force-deleting a branch"
+    },
+    {
+      "pattern": "\\b(curl|wget)\\b[^|]*\\|\\s*(sudo\\s+)?(ba|z|da)?sh\\b",
+      "reason": "piping a download straight into a shell"
+    },
+    {
+      "pattern": "\\brm\\s+(-[a-zA-Z]*r[a-zA-Z]*\\s+)+(/|~|\\$HOME|\\.\\.?)(\\s|$)",
+      "reason": "recursive delete of root, home or the working tree"
+    },
+    {
+      "pattern": "\\bterraform\\s+destroy\\b",
+      "reason": "terraform destroy tears down infrastructure"
+    },
+    {
+      "pattern": "\\bkubectl\\s+delete\\s+(ns|namespace)\\b",
+      "reason": "deleting a Kubernetes namespace"
+    },
+    {
+      "pattern": "\\bdocker\\s+system\\s+prune\\b.*-a",
+      "reason": "docker system prune -a removes every image and volume"
+    },
+    {
+      "pattern": "\\bDROP\\s+(TABLE|DATABASE)\\b",
+      "reason": "dropping a table or database"
+    }
+  ],
+  "audit_log": ".claude/guardrails-audit.jsonl"
+}

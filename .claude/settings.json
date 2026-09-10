@@ -1,0 +1,14 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit|NotebookEdit",
+        "hooks": [ { "type": "command", "command": "$CLAUDE_PROJECT_DIR/hooks/pre_write_guard.sh" } ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [ { "type": "command", "command": "$CLAUDE_PROJECT_DIR/hooks/pre_bash_guard.sh" } ]
+      }
+    ]
+  }
+}
