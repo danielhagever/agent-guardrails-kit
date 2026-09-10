@@ -58,6 +58,6 @@ Hooks run inside Claude Code. They do nothing for a token that is already in the
 
 ## Grade your current setup first
 
-Paste your `settings.json` and `CLAUDE.md` into the [grader](https://agent-guardrails.meshulam791.workers.dev/grade.html). It runs in the browser, uploads nothing, and names the gaps.
+Paste your `settings.json` and `CLAUDE.md` into the [grader](https://agent-guardrails.meshulam791.workers.dev/grade). It runs in the browser, uploads nothing, and names the gaps.
 
 MIT licence. Daniel Meshulam, Israel. I install and test-prove this for teams on Claude Code and Cursor: [agent-guardrails.meshulam791.workers.dev](https://agent-guardrails.meshulam791.workers.dev/).
