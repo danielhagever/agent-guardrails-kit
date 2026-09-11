@@ -2,7 +2,7 @@
 
 Fail-closed guardrails for Claude Code (and any agent that runs shell commands and edits files through hooks). Two PreToolUse hooks, one policy file, an audit log, a real-time alert on every block, a monthly report, an exposure report for the setup you have today, CI templates that prove the policy on every push, and a test suite that proves every block.
 
-    ./tests/run_tests.sh      # 121 assertions, all green
+    ./tests/run_tests.sh      # 125 assertions, all green
 
 Built after an evening of breaking my own deny-list. The story is in the [write-up](https://agent-guardrails.meshulam791.workers.dev/), the short version is below.
 
@@ -22,14 +22,16 @@ Every block appends one JSON line to `.claude/guardrails-audit.jsonl` and, when 
 
     python3 gates/exposure_report.py --settings .claude/settings.json --claudemd CLAUDE.md --repo . --company "Acme"
 
-Scores the setup out of 10 (same rules as the browser grader), lists what an agent can do today with the exact command that would succeed, scans the repo for secret files and secret-looking strings (reports file and pattern, never the value), flags writable CI pipelines, and ends with the fix for each gap. Flags `--prod`, `--ci`, `--cursor`, `--env` describe how agents run at your team.
+Scores the setup out of 10 (same rules as the browser grader), lists what an agent can do today with the exact command that would succeed, scans the repo for secret files and secret-looking strings (reports file and pattern, never the value), flags writable CI pipelines, and ends with the fix for each gap. Flags `--prod`, `--ci`, `--cursor`, `--env` describe how agents run at your team. `--html report.html` writes a standalone page. Sample: [agent-guardrails.meshulam791.workers.dev/sample-report](https://agent-guardrails.meshulam791.workers.dev/sample-report).
 
 ## Care: the parts that run without anyone
 
 - `care/monthly.sh [YYYY-MM]` writes `reports/<month>.md` from the audit log and posts it to the webhook. Cron it monthly.
 - `care/release_watch.sh` re-runs the smoke test the day `claude --version` changes and posts PASS or FAIL. Cron it daily.
+- `care/upstream_watch.py` reads the npm registry and the public CHANGELOG and writes, for each new Claude Code release, only the lines that touch hooks, permission rules, sandboxing, settings or MCP (2.1.268, for example, fixed deny rules that did not apply on symlinked paths or next to `eval`). First run baselines on the latest release; it never floods.
 - `ci/github-guardrails.yml` and `ci/gitlab-guardrails.yml` prove the policy on every push and weekly, and give the README a badge.
 - `templates/cursor-rules.mdc` mirrors the policy where Cursor reads it, since Cursor does not run these hooks.
+- `templates/settings-mcp-allowlist.json` is a starting allow/deny list for MCP tools (`mcp__<server>__<tool>`), secret reads and destructive git commands, to merge into `.claude/settings.json`.
 - `docs/CONTROL-MAPPING.md` maps each guardrail to SOC 2, ISO 27001 and NIST CSF controls, with the evidence each one produces, for the security questionnaire.
 - `docs/AGENT-SAFETY-STACK.md` places hooks among the four other layers (scoped credentials, MCP allow-lists, sandboxed unattended runs, response), because PocketOS was a credentials failure first.
 
@@ -58,11 +60,11 @@ Eight assertions against the installed policy. Wire the same command into CI and
     config.json            all policy: protected paths, read-only verbs, deny patterns, audit log path, alert webhook
     hooks/                 shell wrappers Claude Code calls (pre_bash_guard.sh, pre_write_guard.sh, stop_gate.sh)
     gates/                 the logic: bash_guard.py, write_guard.py, check_deliverable.py, report.py, exposure_report.py, _lib.py
-    care/                  monthly.sh, release_watch.sh
+    care/                  monthly.sh, release_watch.sh, upstream_watch.py
     ci/                    GitHub Actions and GitLab CI templates
-    templates/             cursor-rules.mdc
+    templates/             cursor-rules.mdc, settings-mcp-allowlist.json
     docs/                  CONTROL-MAPPING.md, AGENT-SAFETY-STACK.md, DEVELOPERS.md
-    tests/run_tests.sh     the lab suite (121 assertions); tests/smoke.sh for installed copies
+    tests/run_tests.sh     the lab suite (125 assertions); tests/smoke.sh for installed copies
     .claude/settings.json  the two PreToolUse hooks
 
 `stop_gate.sh` is an optional Stop hook that refuses to end a session until a named deliverable exists and has real content. It is tested but not wired by default.

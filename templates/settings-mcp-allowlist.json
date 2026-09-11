@@ -1,0 +1,33 @@
+{
+  "_comment": "Merge into .claude/settings.json. MCP tools are named mcp__<server>__<tool>. List the servers and tools the team actually needs under allow; deny the write-capable tools you do not want an agent to reach, and the secret files. Anything not allowed still prompts. Replace the example server names with your own.",
+  "permissions": {
+    "allow": [
+      "mcp__github__get_file_contents",
+      "mcp__github__list_pull_requests",
+      "mcp__github__search_code",
+      "mcp__postgres_readonly__query",
+      "Bash(git status)",
+      "Bash(git diff:*)",
+      "Bash(npm test:*)",
+      "Bash(pytest:*)"
+    ],
+    "deny": [
+      "mcp__github__delete_repository",
+      "mcp__github__merge_pull_request",
+      "mcp__github__push_files",
+      "mcp__postgres__execute",
+      "mcp__aws__*",
+      "mcp__kubernetes__*",
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Read(./secrets/**)",
+      "Read(**/*.pem)",
+      "Read(**/id_rsa)",
+      "Bash(git push --force:*)",
+      "Bash(git push -f:*)",
+      "Bash(git reset --hard:*)",
+      "Bash(curl:* | sh)",
+      "Bash(terraform destroy:*)"
+    ]
+  }
+}

@@ -146,13 +146,22 @@ def grade(settings, settings_err, claudemd, repo, flags):
     else:
         findings.append(("gap" if (repo and repo["secret_files"]) or flags.get("env") else "weak",
                          "Nothing stops the agent from reading secret files",
-                         ("Reachable now: " + ", ".join(repo["secret_files"][:6]) + (" and more" if repo and len(repo["secret_files"]) > 6 else "") + ". `cat .env` succeeds.") if repo and repo["secret_files"] else "`cat .env` and `cat ~/.aws/credentials` succeed if those files exist where the agent runs.",
+                         ("Reachable now: " + ", ".join(f"`{x}`" for x in repo["secret_files"][:6]) + (" and more" if repo and len(repo["secret_files"]) > 6 else "") + "; `cat` on any of them succeeds.") if repo and repo["secret_files"] else "`cat .env` and `cat ~/.aws/credentials` succeed if those files exist where the agent runs.",
                          "Deny Read on `.env*`, `*.pem`, `id_rsa`, the secrets folder; move production secrets out of agent-reachable paths."))
     if re.search(r"Bash\(\*\)|^Bash$", allow, re.M):
         score -= 1
         findings.append(("gap", "permissions.allow grants blanket Bash",
                          "Every shell command is pre-approved; the approval prompt that would have caught a bad one never appears.",
                          "Allow narrow patterns only (`Bash(npm test:*)`, `Bash(git status)`)."))
+    if re.search(r"Bash\(git(:\*|\s*\*)\)", allow):
+        score -= 1
+        findings.append(("gap", "`Bash(git:*)` is on the allow list",
+                         "Every git command is pre-approved, including `git push --force origin main`, `git reset --hard` and `git clean -fdx`. No prompt appears.",
+                         "Allow the read-only verbs you use (`Bash(git status)`, `Bash(git diff:*)`, `Bash(git log:*)`) and let the hook decide the rest."))
+    if re.search(r"Read\((\*\*?|/\*\*|\./\*\*)\)", allow):
+        findings.append(("gap", "`Read(**)` is on the allow list",
+                         "Reading any file is pre-approved, so `.env`, key files and credentials are read without a prompt even where a deny rule is missing.",
+                         "Remove the blanket Read allow, or pair it with explicit deny rules for every secret path (deny wins over allow)."))
     if re.search(r"bypassPermissions|dangerouslySkipPermissions|skipPermissions", raw, re.I):
         score -= 2
         findings.append(("gap", "A permission-bypass flag is set",
@@ -205,6 +214,58 @@ def grade(settings, settings_err, claudemd, repo, flags):
     return score, findings
 
 
+def _inline(t):
+    import html as _h
+    t = _h.escape(t, quote=False)
+    t = re.sub(r"`([^`]+)`", r"<code>\1</code>", t)
+    t = re.sub(r"\*\*([^*]+)\*\*", r"<b>\1</b>", t)
+    return t
+
+
+def to_html(md, title):
+    """Just enough Markdown for this report: headings, tables, bullets, bold, code."""
+    import html as _h
+    out, i, rows = [], 0, md.splitlines()
+    while i < len(rows):
+        ln = rows[i]
+        if ln.startswith("# "):
+            out.append(f"<h1>{_inline(ln[2:])}</h1>")
+        elif ln.startswith("## "):
+            out.append(f"<h2>{_inline(ln[3:])}</h2>")
+        elif ln.startswith("_") and ln.endswith("_"):
+            out.append(f"<p class=meta>{_inline(ln.strip('_'))}</p>")
+        elif ln.startswith("|"):
+            tbl = []
+            while i < len(rows) and rows[i].startswith("|"):
+                cells = [c.strip().replace("\\|", "|") for c in re.split(r"(?<!\\)\|", rows[i].strip())[1:-1]]
+                if not all(set(c) <= set("-: ") for c in cells):
+                    tbl.append(cells)
+                i += 1
+            head, body = tbl[0], tbl[1:]
+            out.append("<div class=tw><table><thead><tr>" + "".join(f"<th>{_inline(c)}</th>" for c in head) + "</tr></thead><tbody>"
+                       + "".join("<tr>" + "".join(f"<td>{_inline(c)}</td>" for c in r) + "</tr>" for r in body) + "</tbody></table></div>")
+            continue
+        elif ln.startswith("- "):
+            items = []
+            while i < len(rows) and rows[i].startswith("- "):
+                items.append(f"<li>{_inline(rows[i][2:])}</li>")
+                i += 1
+            out.append("<ul>" + "".join(items) + "</ul>")
+            continue
+        elif ln.strip():
+            out.append(f"<p>{_inline(ln)}</p>")
+        i += 1
+    css = ("body{margin:0;background:#fbfbf8;color:#15171b;font:16px/1.55 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif}"
+           "main{max-width:900px;margin:0 auto;padding:40px 20px 80px}h1{font-size:1.7rem;margin:0 0 6px}h2{font-size:1.2rem;margin:30px 0 10px}"
+           ".meta{color:#5c636b;font-size:.9rem}.tw{overflow-x:auto}table{border-collapse:collapse;width:100%;font-size:.93rem}"
+           "th,td{border-bottom:1px solid #e3e5ea;padding:9px 8px;text-align:left;vertical-align:top}th{color:#5c636b}"
+           "code{background:#eef0f3;padding:1px 5px;border-radius:4px;font:13px ui-monospace,SFMono-Regular,Menlo,monospace}"
+           "li{margin:6px 0}@media (prefers-color-scheme: dark){body{background:#0f1115;color:#e8e8e3}.meta,th{color:#9aa0a6}"
+           "th,td{border-color:#262a33}code{background:#1c2029}}")
+    return (f"<!doctype html><html lang=en><head><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>"
+            f"<title>{_h.escape(title)}</title><style>{css}</style></head><body><main>" + "\n".join(out) + "</main></body></html>")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--settings")
@@ -212,6 +273,7 @@ def main():
     ap.add_argument("--repo")
     ap.add_argument("--company", default="your team")
     ap.add_argument("--out")
+    ap.add_argument("--html", help="also write a standalone HTML page to this path")
     ap.add_argument("--env", action="store_true", help="secret files live in agent-reachable repos")
     ap.add_argument("--prod", action="store_true", help="agents run on machines holding production credentials")
     ap.add_argument("--ci", action="store_true", help="agents run unattended (CI, cron)")
@@ -235,7 +297,8 @@ def main():
     weak = [f for f in findings if f[0] == "weak"]
     if gaps:
         lines += ["## What an agent can do today", "", "| Gap | What succeeds right now | Fix |", "|---|---|---|"]
-        lines += [f"| {t} | {w} | {x} |" for _, t, w, x in gaps]
+        esc = lambda c: c.replace("|", "\\|")  # noqa: E731  a bare | splits the cell
+        lines += [f"| {esc(t)} | {esc(w)} | {esc(x)} |" for _, t, w, x in gaps]
         lines.append("")
     if weak:
         lines += ["## Weak spots", ""] + [f"- **{t}.** {w} Fix: {x}" for _, t, w, x in weak] + [""]
@@ -246,7 +309,8 @@ def main():
         if pre:
             good.append("PreToolUse hooks are wired: " + ", ".join(str(h.get("matcher") or "all tools") for h in pre if isinstance(h, dict)))
         if (s.get("permissions", {}) or {}).get("deny"):
-            good.append(f"{len(s['permissions']['deny'])} deny rules present")
+            n = len(s['permissions']['deny'])
+            good.append(f"{n} deny rule{'s' if n != 1 else ''} present")
     if claudemd and re.search(r"\b(never|do not|don'?t|must not)\b", claudemd, re.I):
         good.append("CLAUDE.md states intent (prose rules exist)")
     if repo and not repo["secret_files"] and not repo["secret_hits"]:
@@ -256,6 +320,10 @@ def main():
     lines += ["## Next step", "",
               "One repo, five evenings: hooks, permission rules, a written policy, and a test suite in your CI that proves every block above is closed. You pay after the tests pass. Free kit to start from: github.com/danielhagever/agent-guardrails-kit", ""]
     text = "\n".join(lines)
+    if a.html:
+        with open(a.html, "w", encoding="utf-8") as f:
+            f.write(to_html(text, f"Agent exposure report: {a.company}"))
+        print(f"wrote {a.html}")
     if a.out:
         with open(a.out, "w", encoding="utf-8") as f:
             f.write(text)

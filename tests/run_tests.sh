@@ -149,6 +149,12 @@ echo "$REPORT" | grep -q "prose rule"; check "exposure report flags prose-only r
 echo "$REPORT" | grep -q "blanket Bash"; check "exposure report flags blanket Bash allow" 0 $?
 GOOD=$(python3 gates/exposure_report.py --settings "$LAB/.claude/settings.json" --claudemd /dev/null --company "Lab" 2>/dev/null)
 echo "$GOOD" | grep -q "Score: [3-9] / 10"; check "exposure report scores the lab's own settings higher" 0 $?
+printf '{"permissions":{"allow":["Bash(git:*)","Read(**)"]}}' > "$FIX/broad.json"
+BROAD=$(python3 gates/exposure_report.py --settings "$FIX/broad.json" 2>/dev/null)
+echo "$BROAD" | grep -q 'Bash(git:\*)` is on the allow list'; check "exposure report flags Bash(git:*) pre-approving force push" 0 $?
+echo "$BROAD" | grep -q 'Read(\*\*)` is on the allow list'; check "exposure report flags blanket Read allow" 0 $?
+echo "$REPORT" | grep '^| No PreToolUse hook on Bash' | awk -F'(^|[^\\\\])[|]' '{print NF}' | grep -q '^5$'; check "table rows keep 3 cells when text contains a pipe" 0 $?
+python3 gates/exposure_report.py --settings "$FIX/settings.json" --html "$FIX/r.html" >/dev/null 2>&1 && grep -q "<table>" "$FIX/r.html" && grep -q "curl ... | sh" "$FIX/r.html"; check "exposure report writes HTML with the table intact" 0 $?
 rm -rf "$FIX"
 
 # --- care/monthly.sh writes the report and posts it ---
