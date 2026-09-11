@@ -17,10 +17,10 @@ DEST="$REPO/guardrails"
 [ -e "$DEST" ] && { echo "refusing: $DEST already exists" >&2; exit 2; }
 
 mkdir -p "$DEST/tests" "$DEST/scratch"
-cp -R "$KIT/hooks" "$KIT/gates" "$DEST/"
+cp -R "$KIT/hooks" "$KIT/gates" "$KIT/care" "$KIT/ci" "$KIT/templates" "$KIT/docs" "$DEST/"
 rm -rf "$DEST/gates/__pycache__"
 cp "$KIT/tests/smoke.sh" "$DEST/tests/smoke.sh"
-chmod +x "$DEST/hooks/"*.sh "$DEST/tests/smoke.sh" "$DEST/gates/report.py"
+chmod +x "$DEST/hooks/"*.sh "$DEST/tests/smoke.sh" "$DEST/gates/report.py" "$DEST/gates/exposure_report.py" "$DEST/care/"*.sh
 
 PY=$("$KIT/hooks/_python.sh")
 KIT="$KIT" DEST="$DEST" "$PY" - "$@" <<'EOF'
@@ -57,5 +57,9 @@ Add to $REPO/.claude/settings.json (merge if it exists):
 }
 
 Then prove it:  $DEST/tests/smoke.sh
+CI template:    $DEST/ci/github-guardrails.yml (or gitlab-guardrails.yml)
+Cursor mirror:  copy $DEST/templates/cursor-rules.mdc to .cursor/rules/guardrails.mdc
+Alerts:         set alert_webhook in $DEST/config.json (Slack or Discord incoming webhook)
+Monthly report: $DEST/care/monthly.sh    Release watch: $DEST/care/release_watch.sh
 Add guardrails-audit.jsonl to .gitignore unless you want the log committed.
 EOF

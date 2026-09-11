@@ -88,6 +88,98 @@ grep -q 'force push' "$AUDIT"; check "audit row carries the policy reason" 0 $?
 python3 gates/report.py "$AUDIT" 2>/dev/null | grep -q "2 blocked"; check "report.py counts the blocks" 0 $?
 rm -f "$AUDIT"
 
+# --- alert webhook: a block is POSTed to the URL in config.json ---
+HOOKDIR=${TMPDIR:-/tmp}/hooks_lab_webhook.$$
+mkdir -p "$HOOKDIR"
+python3 - "$HOOKDIR" <<'PYEOF' &
+import sys, json, http.server, socketserver, threading, os
+d=sys.argv[1]
+class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        n=int(self.headers.get('Content-Length','0')); body=self.rfile.read(n)
+        open(os.path.join(d,'body.json'),'wb').write(body)
+        self.send_response(200); self.end_headers(); self.wfile.write(b'ok')
+    def log_message(self,*a): pass
+with socketserver.TCPServer(('127.0.0.1',0),H) as s:
+    open(os.path.join(d,'port'),'w').write(str(s.server_address[1]))
+    s.handle_request()
+PYEOF
+WPID=$!
+i=0; while [ ! -f "$HOOKDIR/port" ] && [ $i -lt 50 ]; do sleep 0.1; i=$((i+1)); done
+PORT=$(cat "$HOOKDIR/port" 2>/dev/null)
+python3 - "$LAB/config.json" "$PORT" <<'PYEOF'
+import json,sys
+p,port=sys.argv[1],sys.argv[2]; c=json.load(open(p)); c['alert_webhook']=f'http://127.0.0.1:{port}/hook'; json.dump(c,open(p,'w'),indent=2,ensure_ascii=False)
+PYEOF
+printf '%s' "$(j Bash "{\"command\":\"git push --force origin main\"}")" | hooks/pre_bash_guard.sh 2>/dev/null >/dev/null
+check "block still denied with a webhook configured" 2 $?
+wait $WPID 2>/dev/null
+[ -f "$HOOKDIR/body.json" ] && grep -q "force push" "$HOOKDIR/body.json"; check "webhook received the block with its reason" 0 $?
+grep -q '"text"' "$HOOKDIR/body.json" 2>/dev/null; check "webhook body is Slack-compatible" 0 $?
+cp "$SNAP/config.json" "$LAB/config.json"
+rm -rf "$HOOKDIR" "$LAB/.claude/guardrails-audit.jsonl"
+# unreachable webhook must not change the verdict
+python3 - "$LAB/config.json" <<'PYEOF'
+import json,sys
+p=sys.argv[1]; c=json.load(open(p)); c['alert_webhook']='http://127.0.0.1:9/hook'; json.dump(c,open(p,'w'),indent=2,ensure_ascii=False)
+PYEOF
+printf '%s' "$(j Bash "{\"command\":\"git push --force origin main\"}")" | hooks/pre_bash_guard.sh 2>/dev/null >/dev/null
+check "unreachable webhook: block still denied" 2 $?
+printf '%s' "$(j Bash '{"command":"ls -la"}')" | hooks/pre_bash_guard.sh 2>/dev/null >/dev/null
+check "unreachable webhook: allow still allowed" 0 $?
+cp "$SNAP/config.json" "$LAB/config.json"
+rm -f "$LAB/.claude/guardrails-audit.jsonl"
+
+# --- exposure report: finds the gaps, never prints a secret value ---
+FIX=${TMPDIR:-/tmp}/hooks_lab_fixture.$$
+mkdir -p "$FIX/.github/workflows" "$FIX/src"
+printf 'AWS_KEY=AKIAIOSFODNN7EXAMPLE\n' > "$FIX/.env"
+printf 'token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"\n' > "$FIX/src/config.py"
+printf 'name: ci\n' > "$FIX/.github/workflows/ci.yml"
+printf '# Rules\nNever touch production.\n' > "$FIX/CLAUDE.md"
+printf '{"permissions":{"allow":["Bash(*)"]}}' > "$FIX/settings.json"
+REPORT=$(python3 gates/exposure_report.py --settings "$FIX/settings.json" --claudemd "$FIX/CLAUDE.md" --repo "$FIX" --company "Fixture Co" --prod 2>/dev/null)
+echo "$REPORT" | grep -q "Score: [0-1] / 10"; check "exposure report scores a bare setup 0 or 1" 0 $?
+echo "$REPORT" | grep -q "No PreToolUse hook on Bash"; check "exposure report names the missing Bash hook" 0 $?
+echo "$REPORT" | grep -q "AWS access key"; check "exposure report finds the AWS key pattern" 0 $?
+echo "$REPORT" | grep -q "GitHub token"; check "exposure report finds the GitHub token pattern" 0 $?
+echo "$REPORT" | grep -q "AKIAIOSFODNN7EXAMPLE"; check "exposure report never prints the secret value" 1 $?
+echo "$REPORT" | grep -q "ghp_abcdefghijklmnopqrstuvwxyz0123456789"; check "exposure report never prints the token value" 1 $?
+echo "$REPORT" | grep -q "prose rule"; check "exposure report flags prose-only rules" 0 $?
+echo "$REPORT" | grep -q "blanket Bash"; check "exposure report flags blanket Bash allow" 0 $?
+GOOD=$(python3 gates/exposure_report.py --settings "$LAB/.claude/settings.json" --claudemd /dev/null --company "Lab" 2>/dev/null)
+echo "$GOOD" | grep -q "Score: [3-9] / 10"; check "exposure report scores the lab's own settings higher" 0 $?
+rm -rf "$FIX"
+
+# --- care/monthly.sh writes the report and posts it ---
+HOOKDIR2=${TMPDIR:-/tmp}/hooks_lab_webhook2.$$
+mkdir -p "$HOOKDIR2"
+python3 - "$HOOKDIR2" <<'PYEOF' &
+import sys, http.server, socketserver, os
+d=sys.argv[1]
+class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        n=int(self.headers.get('Content-Length','0')); open(os.path.join(d,'body.json'),'wb').write(self.rfile.read(n))
+        self.send_response(200); self.end_headers(); self.wfile.write(b'ok')
+    def log_message(self,*a): pass
+with socketserver.TCPServer(('127.0.0.1',0),H) as s:
+    open(os.path.join(d,'port'),'w').write(str(s.server_address[1])); s.handle_request()
+PYEOF
+WPID2=$!
+i=0; while [ ! -f "$HOOKDIR2/port" ] && [ $i -lt 50 ]; do sleep 0.1; i=$((i+1)); done
+PORT2=$(cat "$HOOKDIR2/port" 2>/dev/null)
+python3 - "$LAB/config.json" "$PORT2" <<'PYEOF'
+import json,sys
+p,port=sys.argv[1],sys.argv[2]; c=json.load(open(p)); c['alert_webhook']=f'http://127.0.0.1:{port}/hook'; json.dump(c,open(p,'w'),indent=2,ensure_ascii=False)
+PYEOF
+mkdir -p "$LAB/.claude"; printf '{"ts":"%s-01T10:00:00+00:00","tool":"Bash","verdict":"deny","reason":"denied by policy: force push rewrites shared history","what":"git push --force"}\n' "$(date +%Y-%m)" > "$LAB/.claude/guardrails-audit.jsonl"
+care/monthly.sh >/dev/null 2>&1; check "monthly.sh runs" 0 $?
+[ -f "$LAB/reports/$(date +%Y-%m).md" ] && grep -q "1 blocked" "$LAB/reports/$(date +%Y-%m).md"; check "monthly report file counts the block" 0 $?
+wait $WPID2 2>/dev/null
+grep -q "blocked" "$HOOKDIR2/body.json" 2>/dev/null; check "monthly report was posted to the webhook" 0 $?
+cp "$SNAP/config.json" "$LAB/config.json"
+rm -rf "$HOOKDIR2" "$LAB/.claude/guardrails-audit.jsonl" "$LAB/reports"
+
 # --- stop gate ---
 rm -f deliverable/report.md
 printf '{"stop_hook_active":false}' | hooks/stop_gate.sh 2>/dev/null

@@ -3,3 +3,6 @@ __pycache__/
 .claude/guardrails-audit.jsonl
 scratch/
 __pycache__/
+reports/
+.last_claude_version
+.release_check.log

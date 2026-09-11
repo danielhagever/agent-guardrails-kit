@@ -1,0 +1,16 @@
+---
+description: Agent guardrails, mirrored from guardrails/config.json. Cursor has its own permission model; this file states the same policy where Cursor reads it.
+alwaysApply: true
+---
+
+# Guardrails (mirror of guardrails/config.json)
+
+These rules are enforced for Claude Code by hooks in `guardrails/`. Cursor does not run those hooks, so the same policy is stated here and in Cursor's admin settings. Prose is not a lock; treat every line below as "ask a human first".
+
+- Never read, print, copy or move the protected paths: `.env*`, `secrets/`, `*.pem`, `id_rsa`, service-account JSON files, `infra/prod/`. Reading them is a security incident, not a shortcut.
+- Never run: `git push --force` (any variant), `git reset --hard`, `git clean -f`, `git checkout -- .`, `git restore .`, `git branch -D`, `rm -rf` on `/`, `~` or the repo root, `curl | sh`, `wget | sh`, `terraform destroy`, `kubectl delete namespace`, `docker system prune -a`, `DROP TABLE`, `DROP DATABASE`.
+- Never edit CI pipeline files (`.github/workflows/`, `.gitlab-ci.yml`) without an explicit human instruction naming the file.
+- Never write outside the repository.
+- If a task seems to require any of the above, stop and say which rule blocks it.
+
+Cursor Business admins: mirror the command list above in the organization's terminal-command policy so the approval prompt is mandatory, not optional, for these commands.

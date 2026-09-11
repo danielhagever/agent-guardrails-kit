@@ -110,5 +110,7 @@
       "reason": "dropping a table or database"
     }
   ],
-  "audit_log": ".claude/guardrails-audit.jsonl"
+  "audit_log": ".claude/guardrails-audit.jsonl",
+  "alert_webhook": "",
+  "_alert_comment": "Optional. A Slack or Discord incoming-webhook URL; every block is POSTed there. Leave empty to disable."
 }

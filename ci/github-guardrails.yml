@@ -1,0 +1,28 @@
+# Copy to .github/workflows/guardrails.yml in the client repo.
+# Proves the installed policy on every push and gives the README a badge:
+#   ![agent guardrails](https://github.com/<org>/<repo>/actions/workflows/guardrails.yml/badge.svg)
+name: agent guardrails
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "17 6 * * 1"   # weekly, so a silent regression surfaces even on a quiet repo
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Prove the guardrails
+        run: guardrails/tests/smoke.sh
+      - name: Policy file is valid JSON and protects something
+        run: |
+          python3 - <<'EOF'
+          import json
+          c = json.load(open("guardrails/config.json"))
+          assert c["protected_paths"], "protected_paths is empty"
+          assert c["deny_patterns"], "deny_patterns is empty"
+          print("policy ok:", len(c["protected_paths"]), "protected paths,", len(c["deny_patterns"]), "deny patterns")
+          EOF

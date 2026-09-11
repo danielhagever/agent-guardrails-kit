@@ -151,8 +151,31 @@ def _audit(v, reason):
                "what": str(what)[:200], "session": _LAST_INPUT.get("session_id", "")}
         with open(path, "a", encoding="utf-8") as f:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        _alert(row)
     except Exception as e:  # noqa: BLE001
         print(f"audit log write failed: {e}", file=sys.stderr)
+
+
+def _alert(row):
+    """POST one line to the webhook named in config.json (alert_webhook).
+
+    Slack and Discord incoming webhooks both accept this body. Three-second
+    timeout, and a failure is reported on stderr only: an unreachable Slack
+    must never change a verdict or slow a block by more than a moment.
+    """
+    try:
+        with open(CONFIG_PATH, encoding="utf-8") as f:
+            url = json.load(f).get("alert_webhook")
+        if not url:
+            return
+        import urllib.request
+        msg = (f"Guardrails blocked {row.get('tool') or 'a tool call'}: {row.get('what') or ''}\n"
+               f"Reason: {row.get('reason')}\nAt: {row.get('ts')}")
+        body = json.dumps({"text": msg, "content": msg}).encode("utf-8")
+        req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
+        urllib.request.urlopen(req, timeout=3).read()
+    except Exception as e:  # noqa: BLE001
+        print(f"alert webhook failed: {e}", file=sys.stderr)
 
 
 def verdict(v, reason, deny_code=2, fail_code=1):
