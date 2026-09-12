@@ -488,26 +488,37 @@ def reads_tree_from_above(verb, toks, vcwd):
     return None
 
 
+def _find_selects(name, full, pats):
+    for flag, pat in pats:
+        target = name if flag in ("-name", "-iname") else full
+        try:
+            if flag == "-regex":
+                if re.search(pat, full):
+                    return True
+            elif fnmatch.fnmatch(target.lower() if flag.startswith("-i") else target,
+                                 pat.lower() if flag.startswith("-i") else pat):
+                return True
+        except re.error:
+            return True
+    return False
+
+
 def _tree_has_match(tree, pats, cap=5000):
-    """Would this find(1) filter select anything inside the tree?"""
+    """Would this find(1) filter select anything inside the tree?
+
+    A declared path is often a single file (`.env`), and os.walk on a file
+    yields nothing, so the tree looked empty and the filter looked harmless.
+    """
+    if os.path.isfile(tree):
+        return _find_selects(os.path.basename(tree), tree, pats)
     seen = 0
     for root, dirs, files in os.walk(tree):
         for name in list(dirs) + files:
             seen += 1
             if seen > cap:
                 return True               # too large to verify: refuse
-            full = os.path.join(root, name)
-            for flag, pat in pats:
-                target = name if flag in ("-name", "-iname") else full
-                try:
-                    if flag == "-regex":
-                        if re.search(pat, full):
-                            return True
-                    elif fnmatch.fnmatch(target.lower() if flag.startswith("-i") else target,
-                                         pat.lower() if flag.startswith("-i") else pat):
-                        return True
-                except re.error:
-                    return True
+            if _find_selects(name, os.path.join(root, name), pats):
+                return True
     return False
 
 

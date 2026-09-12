@@ -122,6 +122,18 @@ def shares_inode(path, trees, cap=50_000):
     key = (st.st_dev, st.st_ino)
     seen = 0
     for tree in trees:
+        # A declared path can be a single FILE (.env is the common case), and
+        # os.walk on a file yields nothing at all, so the hard link to it was
+        # invisible. Found on a client-shaped install, not in the lab, where
+        # every declared path happened to be a directory.
+        if os.path.isfile(tree):
+            try:
+                s1 = os.stat(tree)
+            except OSError:
+                continue
+            if (s1.st_dev, s1.st_ino) == key:
+                return True
+            continue
         for root, _dirs, files in os.walk(tree):
             for fn in files:
                 seen += 1

@@ -115,7 +115,7 @@ A git hook fires on the next commit, a workflow on the next push, `CLAUDE.md` st
 
 Round five stopped attacking Bash and went after the other three doors, and after the guards themselves as programs:
 
-    python3 redteam/tools.py      # 56 cases: Write, Edit, MultiEdit, NotebookEdit, Read, Grep, Glob, MCP
+    python3 redteam/tools.py      # 60 cases: Write, Edit, MultiEdit, NotebookEdit, Read, Grep, Glob, MCP
 
 Four failures, and one of them is the most dangerous kind of bug in a thing like this:
 
@@ -142,6 +142,7 @@ Round six went after the shape of the whole thing rather than another spelling o
 | `find . -name .env -exec ln {} work/hl \;` then `cat work/hl` | a hard link is not a path into the tree, it is a second NAME for the same inode, and `realpath` cannot see it |
 | `ln -s $(printf '../pro%sed' tect) work/a; echo PWNED > work/a/canary.txt` | the alias is created by the first half of the command and used by the second, so at the moment of the check it resolves to nothing |
 | `at now + 1 minute -f work/go.sh` | a scheduler runs the file later; the command line says nothing about what is in it |
+| `ln .env src/hard` then `cat src/hard`, where the secret is a FILE | the inode check walked the declared path, and walking a file yields nothing. Found by installing the kit into a client-shaped repo, not in the lab, where every declared path happened to be a directory |
 
 Recursive verbs rooted above a secret tree are denied (with `--exclude-dir=secrets` as the escape hatch, because a guard that blocks `grep -r` with no way out gets switched off). `find` is judged by where it would walk rather than by what it names. A copy or an extraction has its landing places computed. Hard links are checked by inode, in all four gates. And a link built mid-command, inside a command that keeps going, fails closed; on the next tool call the link is real and the ordinary checks catch it.
 
@@ -222,7 +223,7 @@ This kit is not impenetrable and nothing that runs inside the agent's own proces
 - **Tools that are not Claude Code.** Cursor has its own permission model (`templates/cursor-rules.mdc` mirrors the policy, but the enforcement point is Cursor's admin settings), and anything outside an agent harness is untouched.
 - **A compromised host.** These are hooks, not a sandbox. Unattended runs belong in a container with no network path to production.
 - **Server-side truth.** A force push blocked on the laptop is still worth blocking on the server: branch protection and a pre-receive hook are the copy that survives a bypassed client.
-- **Unknown unknowns.** 253 attacks and 56 tool cases pass today. The number of attacks nobody has written yet is not zero, which is why `redteam/attack.py` is in the repo and why a working bypass is welcome as an issue.
+- **Unknown unknowns.** 253 attacks and 60 tool cases pass today. The number of attacks nobody has written yet is not zero, which is why `redteam/attack.py` is in the repo and why a working bypass is welcome as an issue.
 
 The honest claim is narrow: inside Claude Code, on the paths you declare, the guard fails closed, refuses what it cannot parse, protects its own files, and every claim in this README is a test you can run.
 

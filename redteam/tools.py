@@ -35,6 +35,11 @@ def build():
     open(os.path.join(d, "protected", "canary.txt"), "w").write("CANARY\n")
     open(os.path.join(d, "secrets", ".env"), "w").write("KEY=live\n")
     open(os.path.join(d, "work", "ok.txt"), "w").write("fine\n")
+    # A declared path that is a single FILE, which is what `.env` usually is.
+    # Every fixture here used to be a directory, and os.walk on a file yields
+    # nothing, so a hard link to a file-shaped secret was invisible.
+    open(os.path.join(d, "topsecret.env"), "w").write("TOKEN=live\n")
+    os.link(os.path.join(d, "topsecret.env"), os.path.join(d, "work", "hardfile"))
     # second names for guarded files: same inode, a path that looks like work
     os.link(os.path.join(d, "protected", "canary.txt"), os.path.join(d, "work", "hardlink"))
     os.link(os.path.join(d, "secrets", ".env"), os.path.join(d, "work", "hardsecret"))
@@ -54,7 +59,8 @@ def build():
         shutil.copytree(os.path.join(KIT, part), os.path.join(d, part))
     shutil.rmtree(os.path.join(d, "gates", "__pycache__"), ignore_errors=True)
     cfg = json.load(open(os.path.join(KIT, "config.json")))
-    cfg.update(allowed_tree=".", protected_paths=["protected"], secret_paths=["secrets"],
+    cfg.update(allowed_tree=".", protected_paths=["protected"],
+               secret_paths=["secrets", "topsecret.env"],
                audit_log=".claude/audit.jsonl", alert_webhook="")
     json.dump(cfg, open(os.path.join(d, "config.json"), "w"), indent=2)
     os.symlink(os.path.join(d, "secrets"), os.path.join(d, "work", "slink"))
@@ -166,6 +172,13 @@ CASES = [
      {"command": "rm " + "{a,b}" * 14 + ".txt"}, "any"),
     ("Bash: a glob over the whole tree", "pre_bash_guard.sh", "Bash",
      {"command": "ls work/tree/*/*/*.txt"}, "any"),
+    ("Read a file-shaped secret", "pre_read_guard.sh", "Read", {"file_path": "topsecret.env"}, "deny"),
+    ("Read a hard link to a file-shaped secret", "pre_read_guard.sh", "Read",
+     {"file_path": "work/hardfile"}, "deny"),
+    ("Write a hard link to a file-shaped secret", "pre_write_guard.sh", "Write",
+     {"file_path": "work/hardfile"}, "deny"),
+    ("MCP on a hard link to a file-shaped secret", "pre_mcp_guard.sh", "mcp__fs__read",
+     {"path": "work/hardfile"}, "deny"),
     ("Write: path with a NUL byte", "pre_write_guard.sh", "Write",
      {"file_path": "work/a\x00/../../protected/canary.txt"}, "deny"),
 ]
