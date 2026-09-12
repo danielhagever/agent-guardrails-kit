@@ -3,7 +3,7 @@
 # Feeds the hooks the JSON Claude Code would send and asserts the exit code.
 # Run from anywhere:  guardrails/tests/smoke.sh
 G=$(cd "$(dirname "$0")/.." && pwd)
-REPO=$(cd "$G/.." && pwd)
+REPO=$("$G/hooks/_repo_root.sh")
 PASS=0; FAIL=0
 check() { if [ "$2" -eq "$3" ]; then PASS=$((PASS+1)); echo "  ok   $1"; else FAIL=$((FAIL+1)); echo "  FAIL $1 (expected $2, got $3)"; fi; }
 j() { printf '{"tool_name":"%s","cwd":"%s","tool_input":%s}' "$1" "$REPO" "$2"; }

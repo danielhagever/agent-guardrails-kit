@@ -9,7 +9,7 @@
 # every number in it comes from a command that just ran on their machine.
 set -e
 G=$(cd "$(dirname "$0")/.." && pwd)
-REPO=$(cd "$G/.." && pwd)
+REPO=$("$G/hooks/_repo_root.sh")
 PY=$("$G/hooks/_python.sh")
 CLIENT=${1:-$(basename "$REPO")}
 DATE=$(date +%Y-%m-%d)
@@ -29,16 +29,54 @@ TOOLS_LINE="$TOOLS_LINE" KIT_COMMIT="$KIT_COMMIT" "$PY" - > "$OUT" <<'EOF'
 import json, os, subprocess
 
 g, repo = os.environ["G"], os.environ["REPO"]
+R = lambda p: os.path.realpath(os.path.join(g, os.path.expanduser(p)))
 cfg = json.load(open(os.path.join(g, "config.json")))
 rel = lambda p: p.replace("../", "")
+# Not "is it listed in settings.json" but "does it run, and does it refuse".
+# A hook can be wired and unreadable, wired and not executable, wired and
+# pointing at a path that moved. Each one is asked a question it must answer
+# with a refusal, right now, on this machine.
 settings_path = os.path.join(repo, ".claude", "settings.json")
+first_prot = (cfg.get("protected_paths") or [""])[0]
+first_secret = (cfg.get("secret_paths") or [""])[0]
+PROBE = {
+    "Bash": ("Bash", {"command": f"rm -rf {R(first_prot)}"}),
+    "Write": ("Write", {"file_path": R(first_prot)}),
+    "Read": ("Read", {"file_path": R(first_secret)} if first_secret else None),
+    "mcp__": ("mcp__fs__write", {"path": R(first_prot)}),
+    "*": ("ToolThisPolicyHasNeverHeardOf", {"target": R(first_prot)}),
+}
+
+
+def probe(matcher, command):
+    key = next((k for k in ("Bash", "Write", "Read", "mcp__") if k in matcher), "*")
+    tool, payload = PROBE[key]
+    if payload is None:
+        return "no secret_paths declared, nothing to probe with"
+    path = command.replace("$CLAUDE_PROJECT_DIR", repo).replace("${CLAUDE_PROJECT_DIR}", repo)
+    if not os.path.exists(path):
+        return f"**MISSING**: {path} does not exist"
+    if not os.access(path, os.X_OK):
+        return f"**NOT EXECUTABLE**: chmod +x {path}"
+    body = json.dumps({"tool_name": tool, "cwd": repo, "tool_input": payload})
+    try:
+        p = subprocess.run([path], input=body, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as e:
+        return f"**COULD NOT RUN**: {e}"
+    if p.returncode == 2:
+        return "refused the probe (exit 2)"
+    return f"**ALLOWED THE PROBE** (exit {p.returncode}), which means this hook is not protecting anything"
+
+
 wired = []
 try:
-    s = json.load(open(settings_path))
-    for h in (s.get("hooks", {}) or {}).get("PreToolUse", []):
-        wired.append(h.get("matcher") or "(all tools)")
+    st = json.load(open(settings_path))
+    for h in (st.get("hooks", {}) or {}).get("PreToolUse", []):
+        matcher = h.get("matcher") or "(all tools)"
+        for entry in h.get("hooks", []):
+            wired.append((matcher, probe(matcher, entry.get("command", ""))))
 except (OSError, ValueError):
-    wired = ["NOT WIRED: .claude/settings.json has no PreToolUse hooks"]
+    wired = [("NOT WIRED", "**.claude/settings.json has no PreToolUse hooks**")]
 
 p = lambda *a: print(*a)
 p(f"# Agent guardrails: delivery report")
@@ -65,7 +103,12 @@ p(f"- **{len(cfg.get('deny_patterns', []))} destructive-command patterns**, chec
   f"and git config keys that decide what git executes.")
 p(f"- **{len(cfg.get('interpreter_verbs', []))} interpreter verbs** whose quoted payloads are re-lexed, so "
   f"`sh -c '...'`, `python -c '...'` and `perl -e '...'` are read rather than trusted.")
-p(f"- **Hooks wired in `.claude/settings.json`:** " + ", ".join(f"`{w}`" for w in wired) + ".")
+p(f"\n**The hooks, each one run just now with a payload it must refuse:**\n")
+p("| Matcher | Proof |")
+p("|---|---|")
+for matcher, result in wired:
+    p(f"| `{matcher}` | {result} |")
+p("")
 p(f"- **Every block is logged** to `{cfg.get('audit_log')}`" +
   (f" and posted to your webhook." if cfg.get("alert_webhook") else
    " (no alert webhook set yet: add one in guardrails/config.json to get a Slack or Discord message per block)."))
@@ -93,6 +136,9 @@ p("- `guardrails/ci/github-guardrails.yml` (or the GitLab one) runs the smoke te
 p("- `guardrails/care/release_watch.sh`, run daily, re-proves the policy the day Claude Code changes version.")
 p("- `guardrails/care/monthly.sh` turns the audit log into a monthly report of what the agents tried and were "
   "stopped from doing.")
+p("- `guardrails/care/drift.sh` answers the question this report cannot: is the policy still true? It lists "
+  "credential-looking files and production-looking directories that have appeared since it was written and are "
+  "not covered by any declared path. Run it monthly; it reads names, never contents.")
 
 p("\n## What this does not cover\n")
 p("- A credential already exported in the shell the agent inherits, or a cloud CLI already logged in on the "
@@ -104,7 +150,7 @@ p("- A compromised host. These are hooks, not a sandbox. Unattended runs belong 
   "network path to production.")
 p("- Anything server-side. A force push blocked on a laptop is still worth blocking on the server: branch "
   "protection and a pre-receive hook are the copy that survives a bypassed client.")
-p("- Attacks nobody has written yet. 297 executed attacks and 69 tool-guard cases are tested here, over eight "
+p("- Attacks nobody has written yet. 316 executed attacks and 69 tool-guard cases are tested here, over nine "
   "rounds; the number outstanding is not zero, which is why both red teams ship with the kit and why a "
   "working bypass is welcome as an issue.")
 EOF

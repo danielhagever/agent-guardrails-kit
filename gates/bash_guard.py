@@ -74,7 +74,7 @@ def _clean(token):
     `curl -d @secrets/x` and `tar --file=secrets/x` both hide a path behind a
     prefix, and the first version of this guard read straight past both.
     """
-    t = clean_uri(token).strip("'\"").strip()
+    t = clean_uri(ansi_c_decode(token)).strip("'\"").strip()
     for prefix in ("@", "+", ":", "~+/"):
         if t.startswith(prefix):
             t = t[len(prefix):]
@@ -124,6 +124,114 @@ def lex(text):
     lx = shlex.shlex(text, posix=True, punctuation_chars=True)
     lx.whitespace_split = True
     return list(lx)
+
+
+
+def ansi_c_decode(token):
+    """`$'\\x70rotected/x'` is `protected/x` to the shell and gibberish to shlex.
+
+    shlex knows single quotes but not the $'...' form, which decodes escapes
+    before the command ever runs. The guard was comparing a string containing
+    a literal backslash against a path that contains none.
+    """
+    if not token.startswith("$") or "\\" not in token:
+        return token
+    body = token[1:]
+    try:
+        return body.encode("utf-8", "surrogateescape").decode("unicode_escape")
+    except (UnicodeDecodeError, UnicodeEncodeError, ValueError):
+        return token
+
+
+def _pure_text(inner):
+    """The text a substitution produces, when it is only text.
+
+    `$(printf 'prot%sed/canary.txt' ect)` is deterministic: no files are read,
+    nothing is executed that matters. Working it out turns an unresolvable
+    token into a path the ordinary checks can judge. Anything with a side
+    effect, a pipe or another substitution in it is left alone, and the
+    existing rules for what cannot be resolved still apply to it.
+    """
+    try:
+        toks = lex(inner)
+    except ValueError:
+        return None
+    if not toks:
+        return None
+    verb, args = os.path.basename(toks[0]), toks[1:]
+    if any(re.search(r"[$`(){};|&<>]", a) for a in args):
+        return None
+    if verb == "echo":
+        return " ".join(a for a in args if not a.startswith("-"))
+    if verb == "printf" and args:
+        fmt, rest = args[0], args[1:]
+        try:
+            return (fmt % tuple(rest)) if "%" in fmt else fmt
+        except (TypeError, ValueError):
+            return None
+    if verb == "basename" and len(args) == 1:
+        return os.path.basename(args[0])
+    if verb == "dirname" and len(args) == 1:
+        return os.path.dirname(args[0])
+    return None
+
+
+def _expand_substitutions(text, depth=0):
+    if depth > 2:
+        return text
+    out, i = "", 0
+    while i < len(text):
+        if text.startswith("$(", i):
+            level, j = 1, i + 2
+            while j < len(text) and level:
+                level += (text[j] == "(") - (text[j] == ")")
+                j += 1
+            inner = text[i + 2:j - 1]
+            got = _pure_text(_expand_substitutions(inner, depth + 1))
+            if got is not None:
+                out += got
+                i = j
+                continue
+        if text[i] == "`":
+            j = text.find("`", i + 1)
+            if j > 0:
+                got = _pure_text(text[i + 1:j])
+                if got is not None:
+                    out += got
+                    i = j + 1
+                    continue
+        out += text[i]
+        i += 1
+    return out
+
+
+def preexpand(cmd):
+    """Do what the shell does before the command runs: substitute, then look.
+
+    `LOG=protected/canary.txt; echo PWNED > $LOG` put the path in a variable and
+    the redirection target in another token, so every check saw `$LOG`, which
+    resolves to nothing, and `echo` is on the read-only list. The shell knows
+    better, and so must this. Only variables the command sets ITSELF are used;
+    one inherited from the environment is not something the agent can point at
+    a protected path from inside a single call.
+    """
+    try:
+        toks = lex(cmd)
+    except ValueError:
+        return cmd
+    seen = {}
+    for t in toks:
+        m = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$", t)
+        if m:
+            seen[m.group(1)] = m.group(2)
+    out = _expand_substitutions(cmd)
+    for _ in range(3):
+        new = re.sub(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)",
+                     lambda m: seen.get(m.group(1) or m.group(2), m.group(0)), out)
+        if new == out:
+            break
+        out = new
+    return out
 
 
 def secret_mentions(token, vcwd, deep, depth=0):
@@ -265,7 +373,7 @@ def npm_or_make_target(toks, vcwd):
     mentioned a protected path, which is a false positive a team would not
     forgive.
     """
-    verb = os.path.basename(toks[0]).lower()
+    verb = os.path.basename(ansi_c_decode(toks[0])).lower()
     args = [a for a in toks[1:] if a not in ("run", "run-script")]
     if verb in ("npm", "pnpm", "yarn", "bun"):
         prefix = vcwd
@@ -746,6 +854,34 @@ def copy_lands_in_protected(verb, toks, vcwd):
     return None
 
 
+def symlink_target_guarded(verb, toks, vcwd):
+    """A relative symlink target is relative to the LINK, not to the shell.
+
+    `ln -s ../protected work/alias` makes work/alias point at <repo>/protected,
+    because the kernel resolves the target from the link's own directory. The
+    guard resolved it from the working directory, landing a level above the
+    repository on a path that does not exist, and said nothing. It was hidden
+    until round nine because the only test for it wrote the target as a
+    substitution, and the rule for "a target I cannot resolve" caught it by
+    accident. Once round nine could resolve the substitution, the accident
+    stopped happening and the real gap showed.
+    """
+    if verb != "ln":
+        return None
+    operands = [t for t in toks[1:] if not t.startswith("-")]
+    if len(operands) < 2:
+        return None
+    target, linkname = _clean(operands[0]), _clean(operands[-1])
+    if not target:
+        return None
+    base = os.path.dirname(resolve(linkname, vcwd)) or vcwd
+    full = target if os.path.isabs(target) else os.path.normpath(os.path.join(base, target))
+    full = resolve(full, base)
+    if in_any_protected(full, cfg) or any(within(full, sec) for sec in cfg.get("_secret_abs", [])):
+        return full
+    return None
+
+
 def alias_built_mid_command(verb, toks, more_follows):
     """`ln -s $(printf 'pro%sed' tect) work/a; echo PWNED > work/a/canary.txt`
 
@@ -768,8 +904,19 @@ def alias_built_mid_command(verb, toks, more_follows):
     return bool(re.search(r"[$`*?\[]", operands[0]))
 
 
+expanded = preexpand(cmd)
+if expanded != cmd:
+    # the shell would have run this text, so the policy is checked against it too
+    for rule in cfg.get("deny_patterns", []):
+        try:
+            if re.search(rule["pattern"], expanded, flags=re.IGNORECASE):
+                verdict("deny", f"denied by policy once expanded: {rule['reason']}")
+        except (re.error, KeyError):
+            verdict("deny", "malformed deny_patterns entry in config.json; failing closed")
+    touches = touches or any(p in expanded for p in cfg["_protected_abs"])
+
 try:
-    tokens = lex(cmd)
+    tokens = lex(expanded)
 except ValueError as e:
     verdict("deny", f"unparseable quoting in the command, refusing to guess: {e}")
 
@@ -846,6 +993,11 @@ for idx, toks in enumerate(live_segments):
     if landed:
         verdict("deny", f"'{verb}' would put a file at {landed}, inside the protected tree, "
                         f"without naming it: the source is shaped like the repository")
+    aimed = symlink_target_guarded(verb, toks, vcwd)
+    if aimed:
+        verdict("deny", f"this link would point at {os.path.basename(aimed)}, which is guarded; "
+                        f"a relative link target is resolved from the link's own directory, so the "
+                        f"path it reaches is not the one the command appears to name")
     if alias_built_mid_command(verb, toks, idx < last_idx):
         verdict("deny", "this command builds a link whose target cannot be resolved yet and then "
                         "keeps going; a hard link would be a second name for a guarded file and a "

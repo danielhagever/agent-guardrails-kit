@@ -237,9 +237,20 @@
     ".envrc",
     "CLAUDE.md",
     ".claude",
-    ".vscode/tasks.json"
+    ".vscode/tasks.json",
+    ".husky",
+    ".pre-commit-config.yaml",
+    "Taskfile.yml",
+    "Taskfile.yaml",
+    "Justfile",
+    "justfile",
+    ".vscode/settings.json",
+    ".devcontainer",
+    ".hooks",
+    ".lefthook.yml",
+    ".githooks"
   ],
-  "_execution_surface_comment": "Files nobody runs on purpose and everybody runs anyway: a git hook fires on the next commit, a workflow on the next push, CLAUDE.md steers the agent itself. Writing to them is denied even though the canary is untouched, because the damage happens later and somewhere else. Reading stays allowed. Resolved against the project root, so an installed copy protects the repo's files, not the kit's. package.json and Makefile are deliberately NOT here: an agent adding a dependency edits package.json every day, so listing it would get the whole policy switched off. Add it yourself if your team's scripts are the thing you are protecting.",
+  "_execution_surface_comment": "Files nobody runs on purpose and everybody runs anyway: a git hook fires on the next commit, a workflow on the next push, CLAUDE.md steers the agent itself. Writing to them is denied even though the canary is untouched, because the damage happens later and somewhere else. Reading stays allowed. Resolved against the project root, so an installed copy protects the repo's files, not the kit's. package.json and Makefile are deliberately NOT here: an agent adding a dependency edits package.json every day, so listing it would get the whole policy switched off. Add it yourself if your team's scripts are the thing you are protecting. Round nine added the ones a JavaScript or Python repo actually runs: .husky (git hooks installed by npm), .pre-commit-config.yaml, Taskfile/Justfile, .devcontainer, .vscode/settings.json. conftest.py, Makefile and package.json are deliberately NOT here, because a developer edits those daily; add them yourself if the agent has no business touching your test or build plumbing.",
   "protect_execution_surface": true,
   "recursive_readers": [
     "grep",

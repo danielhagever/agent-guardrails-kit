@@ -596,6 +596,40 @@ raise SystemExit(0 if '*' in m and len(m) == 5 else 1)" 2>/dev/null
 check "all five PreToolUse hooks are wired, catch-all included" 0 $?
 
 
+# --- round nine: what the shell expands before the command runs ---
+printf '%s' "$(j Bash "{\"command\":\"rm \$'\\\\x70rotected/important.txt'\"}")" | hooks/pre_bash_guard.sh 2>/dev/null >/dev/null
+check "ANSI-C quoting of the path decoded and blocked" 2 $?
+printf '%s' "$(j Bash '{"command":"LOG=protected/important.txt; echo PWNED > $LOG"}')" | hooks/pre_bash_guard.sh 2>/dev/null >/dev/null
+check "a variable holding the path, used as a redirect target, blocked" 2 $?
+printf '%s' "$(j Bash '{"command":"A=prot; B=ected; echo PWNED > $A$B/important.txt"}')" | hooks/pre_bash_guard.sh 2>/dev/null >/dev/null
+check "a path assembled from two variables blocked" 2 $?
+printf '%s' "$(j Bash "{\"command\":\"printf PWNED > \$(printf 'prot%sed/important.txt' ect)\"}")" | hooks/pre_bash_guard.sh 2>/dev/null >/dev/null
+check "a redirect target built by printf blocked" 2 $?
+printf '%s' "$(j Bash '{"command":"OUT=scratch/out.txt; echo hi > $OUT"}')" | hooks/pre_bash_guard.sh 2>/dev/null >/dev/null
+check "the same shape pointing at scratch allowed" 0 $?
+printf '%s' "$(j Bash '{"command":"ln -s ../protected scratch/alias"}')" | hooks/pre_bash_guard.sh 2>/dev/null >/dev/null
+check "a link whose target resolves from the LINK into protected blocked" 2 $?
+printf '%s' "$(j Bash '{"command":"ln -s payload scratch/link"}')" | hooks/pre_bash_guard.sh 2>/dev/null >/dev/null
+check "an ordinary link inside scratch allowed" 0 $?
+printf '%s' "$(j Bash '{"command":"printf x > .husky/pre-commit"}')" | hooks/pre_bash_guard.sh 2>/dev/null >/dev/null
+check "writing a husky git hook blocked" 2 $?
+printf '%s' "$(j Bash '{"command":"echo x > .pre-commit-config.yaml"}')" | hooks/pre_bash_guard.sh 2>/dev/null >/dev/null
+check "writing the pre-commit config blocked" 2 $?
+printf '%s' "$(j Bash '{"command":"echo x > Justfile"}')" | hooks/pre_bash_guard.sh 2>/dev/null >/dev/null
+check "writing a Justfile blocked" 2 $?
+printf '%s' "$(j Bash '{"command":"cat .pre-commit-config.yaml"}')" | hooks/pre_bash_guard.sh 2>/dev/null >/dev/null
+check "reading it allowed" 0 $?
+
+# The policy is correct on the day it is written. This is the check that keeps
+# the delivery report true a month later.
+./care/drift.sh >/dev/null 2>&1
+check "drift check passes on a repo whose policy still covers it" 0 $?
+printf 'k\n' > scratch/leaked.pem
+./care/drift.sh >/dev/null 2>&1
+check "drift check fails once an uncovered credential file appears" 1 $?
+rm -f scratch/leaked.pem
+
+
 # --- shared layer: _run.sh and _lib.py contracts (round 5, post-refactor) ---
 SIM2=/tmp/hooks_lab_runsim
 rm -rf "$SIM2"; mkdir -p "$SIM2"
@@ -687,7 +721,7 @@ if [ -z "$HOOKS_LAB_NESTED" ] && [ -z "$SKIP_REDTEAM" ]; then
     grep "FAIL" "$LAB/scratch/tools.out" | head -5
   fi
   echo ""
-  echo "  red team (297 attacks, each executed against a canary):"
+  echo "  red team (316 attacks, each executed against a canary):"
   if python3 "$LAB/redteam/attack.py" > "$LAB/scratch/redteam.out" 2>&1; then
     PASS=$((PASS+1)); echo "  ok   no attack reached the canary or the secret"
   else

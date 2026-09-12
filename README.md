@@ -2,7 +2,7 @@
 
 Fail-closed guardrails for Claude Code (and any agent that runs shell commands and edits files through hooks). Five PreToolUse hooks, one policy file, an audit log, a real-time alert on every block, a monthly report, an exposure report for the setup you have today, CI templates that prove the policy on every push, and a test suite that proves every block.
 
-    ./tests/run_tests.sh      # 234 assertions, all green
+    ./tests/run_tests.sh      # 247 assertions, all green
 
 Built after an evening of breaking my own deny-list. The story is in the [write-up](https://agent-guardrails.meshulam791.workers.dev/), the short version is below.
 
@@ -27,7 +27,8 @@ Scores the setup out of 10 (same rules as the browser grader), lists what an age
 
 ## Care: the parts that run without anyone
 
-- `care/deliver.sh "Client name"` writes the handover document: what is protected, what is enforced, what was proven by running the smoke test and the red team on that machine today, and what the kit does not cover. Markdown and HTML, generated from the installed policy rather than written by hand.
+- `care/deliver.sh "Client name"` writes the handover document: what is protected, what is enforced, what was proven by running the smoke test and the red team on that machine today, and what the kit does not cover. Markdown and HTML, generated from the installed policy rather than written by hand. Every wired hook is **run** while the report is written, with a payload it must refuse, so the table says "refused the probe (exit 2)" or names the hook that has moved or lost its executable bit.
+- `care/drift.sh` answers the question a delivery report cannot: is the policy still true? It lists credential-looking files and production-looking directories that have appeared since install and are not covered by any declared path. Names and reasons only; it never reads a file. Exits 1 when something is uncovered, so it belongs in CI and in the monthly run.
 - `care/monthly.sh [YYYY-MM]` writes `reports/<month>.md` from the audit log and posts it to the webhook. Cron it monthly.
 - `care/release_watch.sh` re-runs the smoke test the day `claude --version` changes and posts PASS or FAIL. Cron it daily.
 - `care/upstream_watch.py` reads the npm registry and the public CHANGELOG and writes, for each new Claude Code release, only the lines that touch hooks, permission rules, sandboxing, settings or MCP (2.1.268, for example, fixed deny rules that did not apply on symlinked paths or next to `eval`). First run baselines on the latest release; it never floods.
@@ -59,7 +60,7 @@ An agent that can delete the guard is not guarded. `self_protect` (on by default
 
 ## The red team: measured, not claimed
 
-    python3 redteam/attack.py      # 297 attacks, 0 leaks
+    python3 redteam/attack.py      # 316 attacks, 0 leaks
 
 Every other test here asks the guard for a verdict and believes it. This one builds a throwaway sandbox with a canary in a protected path and a fake credential in a secret path, asks the guard, **runs the command anyway**, and compares the two. Four outcomes, all counted:
 
@@ -205,6 +206,24 @@ Round eight went after the list of tool names itself, and after everything the p
 Then the structural one. The four gates name the tools they cover, and **an allow-list of tool names fails open the day a name changes**: when Claude Code ships a file-editing tool nobody here predicted, no matcher fires, no gate runs, and the settings file still looks complete. `gates/any_guard.py` matches everything, returns at once for the tools that have a gate of their own, and for a stranger walks every string in the payload and refuses the guarded paths. A hypothetical `FutureEditTool` writing into `protected/` is denied today, and so is `WebFetch` pointed at a secret with `file://`.
 
 
+Round nine attacked the guard's model of the shell, and found that the shell does four things before a command runs that the guard was not doing:
+
+| Attack | Why it worked |
+|---|---|
+| `rm $'\x70rotected/canary.txt'` | `$'…'` decodes escapes before the command runs. `shlex` knows single quotes and not this form, so the guard compared a string containing a literal backslash against a path that has none |
+| `LOG=protected/canary.txt; echo PWNED > $LOG` | the path went into a variable and the redirection target became `$LOG`, which resolves to nothing. `echo` is on the read-only list, so the command passed twice over |
+| `A=prot; B=ected; echo PWNED > $A$B/canary.txt` | assembled from two halves, so no fragment of the name appears anywhere |
+| `printf PWNED > $(printf 'prot%sed/canary.txt' ect)` | the target is produced by a substitution, and the lexer had already split it into pieces |
+
+The guard now expands what the shell would expand **before** it judges: `$'…'` escapes are decoded, variables the command sets itself are substituted, and substitutions that are pure text (`$(echo …)`, `$(printf …)`, `` `basename …` ``) are worked out and put back. The deny patterns are then checked against the expanded text as well, so a destructive flag hidden in a variable is caught too. A variable inherited from the environment is still opaque, and stays allowed, because nothing inside a single command can point it at a protected path.
+
+That fix broke two round-six blocks, which is the useful part. `ln -s $(printf '../pro%sed' tect) work/alias` had been denied for the right reason by accident: the target could not be resolved. Once it could, the real gap showed, and it was older and worse: **a relative symlink target is resolved from the link's own directory, not from the working directory**, so `ln -s ../protected work/alias` reaches the protected tree while the guard was resolving it a level above the repository, to a path that does not exist. Modelled properly now.
+
+The same round added the files a real repository executes without anyone typing their name: `.husky/` (git hooks installed by npm), `.pre-commit-config.yaml`, `Taskfile.yml`, `Justfile`, `.devcontainer/`, `.vscode/settings.json`. `conftest.py`, `Makefile` and `package.json` are deliberately left out, because a developer edits those daily and a guard that blocks the day job gets switched off; the config comment says how to add them.
+
+And two things that keep the promise true after the day of the install. The delivery report no longer says a hook is "wired", it **runs** every hook in `.claude/settings.json` with a payload it must refuse, which catches a hook that has moved or lost its executable bit (a hook Claude Code cannot execute is a broken gate, and a broken gate does not stop the tool call). `care/drift.sh` lists credential-looking files and production-looking directories that have appeared since the policy was written and are not covered by it.
+
+
 ## MCP tools are a second set of hands
 
 Hooks on Bash and Write cover the tools Claude Code ships with. An MCP filesystem server, a database tool or a deploy helper reaches the same disk through a different door, and none of the rules above see it. `gates/mcp_guard.py` walks every string in an MCP payload, however deeply nested, and denies the call when one resolves inside a protected or secret path. Calls with no path, or a path elsewhere, pass untouched.
@@ -247,11 +266,11 @@ Eleven assertions against the installed policy. Wire the same command into CI an
     config.json            all policy: protected paths, read-only verbs, deny patterns, audit log path, alert webhook
     hooks/                 shell wrappers Claude Code calls (pre_bash_guard.sh, pre_write_guard.sh, pre_read_guard.sh, pre_mcp_guard.sh, pre_any_guard.sh, stop_gate.sh)
     gates/                 the logic: bash_guard.py, write_guard.py, read_guard.py, mcp_guard.py, any_guard.py, check_deliverable.py, report.py, exposure_report.py, _lib.py
-    care/                  monthly.sh, release_watch.sh, upstream_watch.py
+    care/                  deliver.sh, drift.sh, monthly.sh, release_watch.sh, upstream_watch.py
     ci/                    GitHub Actions and GitLab CI templates
     templates/             cursor-rules.mdc, settings-mcp-allowlist.json
     docs/                  CONTROL-MAPPING.md, AGENT-SAFETY-STACK.md, DEVELOPERS.md
-    tests/run_tests.sh     the lab suite (234 assertions); tests/smoke.sh for installed copies
+    tests/run_tests.sh     the lab suite (247 assertions); tests/smoke.sh for installed copies
     .claude/settings.json  the five PreToolUse hooks (Bash, writes, reads, MCP, catch-all)
 
 `stop_gate.sh` is an optional Stop hook that refuses to end a session until a named deliverable exists and has real content. It is tested but not wired by default.
@@ -266,9 +285,10 @@ This kit is not impenetrable and nothing that runs inside the agent's own proces
 
 - **A credential already in the environment.** If `AWS_SECRET_ACCESS_KEY` is exported in the shell the agent inherits, or `~/.aws/credentials` is logged in on the same machine, no hook helps. Scope the agent's identity; that is the layer that would have saved PocketOS.
 - **Tools that are not Claude Code.** Cursor has its own permission model (`templates/cursor-rules.mdc` mirrors the policy, but the enforcement point is Cursor's admin settings), and anything outside an agent harness is untouched.
+- **Writes outside the repository from a shell command.** The Write and Edit tools are confined to the allowed tree; a Bash command is judged on the paths the policy declares, so `echo x > /tmp/scratch` is allowed on purpose. The files outside the repository that decide what runs later (`~/.claude/settings.json`, shell rc files, `~/.gitconfig`, `~/.ssh/config`, LaunchAgents) are in `home_execution_surface` and denied; everything else in the home directory is not.
 - **A compromised host.** These are hooks, not a sandbox. Unattended runs belong in a container with no network path to production.
 - **Server-side truth.** A force push blocked on the laptop is still worth blocking on the server: branch protection and a pre-receive hook are the copy that survives a bypassed client.
-- **Unknown unknowns.** 297 attacks and 69 tool cases pass today. The number of attacks nobody has written yet is not zero, which is why `redteam/attack.py` is in the repo and why a working bypass is welcome as an issue.
+- **Unknown unknowns.** 316 attacks and 69 tool cases pass today. The number of attacks nobody has written yet is not zero, which is why `redteam/attack.py` is in the repo and why a working bypass is welcome as an issue.
 
 The honest claim is narrow: inside Claude Code, on the paths you declare, the guard fails closed, refuses what it cannot parse, protects its own files, and every claim in this README is a test you can run.
 
