@@ -26,6 +26,7 @@ Scores the setup out of 10 (same rules as the browser grader), lists what an age
 
 ## Care: the parts that run without anyone
 
+- `care/deliver.sh "Client name"` writes the handover document: what is protected, what is enforced, what was proven by running the smoke test and the red team on that machine today, and what the kit does not cover. Markdown and HTML, generated from the installed policy rather than written by hand.
 - `care/monthly.sh [YYYY-MM]` writes `reports/<month>.md` from the audit log and posts it to the webhook. Cron it monthly.
 - `care/release_watch.sh` re-runs the smoke test the day `claude --version` changes and posts PASS or FAIL. Cron it daily.
 - `care/upstream_watch.py` reads the npm registry and the public CHANGELOG and writes, for each new Claude Code release, only the lines that touch hooks, permission rules, sandboxing, settings or MCP (2.1.268, for example, fixed deny rules that did not apply on symlinked paths or next to `eval`). First run baselines on the latest release; it never floods.

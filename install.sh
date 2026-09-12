@@ -43,11 +43,50 @@ json.dump(cfg, open(os.path.join(dest, "config.json"), "w"), indent=2, ensure_as
 print("protected:", ", ".join(paths))
 EOF
 
+# Wire the hooks for real. Printing a block to paste was the whole activation
+# step, and a delivery report on a fresh install came back saying NOT WIRED:
+# an installed guard that nobody switched on is worse than none, because the
+# directory is there and everyone assumes it is working.
+if [ "$1" = "--print-only" ] || [ "$PRINT_ONLY" = "1" ]; then
+  WIRED="skipped (--print-only): add the block below yourself"
+else
+  REPO="$REPO" DEST="$DEST" "$PY" - <<'PYEOF'
+import json, os, shutil
+repo, dest = os.environ["REPO"], os.environ["DEST"]
+path = os.path.join(repo, ".claude", "settings.json")
+os.makedirs(os.path.dirname(path), exist_ok=True)
+data = {}
+if os.path.exists(path):
+    shutil.copy(path, path + ".before-guardrails")
+    try:
+        data = json.load(open(path))
+    except ValueError:
+        raise SystemExit(f"{path} is not valid JSON; refusing to touch it. Add the block by hand.")
+hooks = data.setdefault("hooks", {})
+pre = hooks.setdefault("PreToolUse", [])
+wanted = [
+    ("Write|Edit|MultiEdit|NotebookEdit", "pre_write_guard.sh"),
+    ("Bash", "pre_bash_guard.sh"),
+    ("Read|Grep|Glob|NotebookRead", "pre_read_guard.sh"),
+    ("mcp__.*", "pre_mcp_guard.sh"),
+]
+for matcher, script in wanted:
+    cmd = "$CLAUDE_PROJECT_DIR/guardrails/hooks/" + script
+    if any(cmd in json.dumps(entry) for entry in pre):
+        continue
+    pre.append({"matcher": matcher, "hooks": [{"type": "command", "command": cmd}]})
+json.dump(data, open(path, "w"), indent=2)
+print(f"wired {len(wanted)} hooks into {path}")
+PYEOF
+  WIRED="done automatically (a backup of any previous settings.json is beside it)"
+fi
+
 cat <<EOF
 
 Installed into $DEST
+Hooks wired: $WIRED
 
-Add to $REPO/.claude/settings.json (merge if it exists):
+For reference, this is what was added to $REPO/.claude/settings.json:
 
 {
   "hooks": {
@@ -64,11 +103,14 @@ Add to $REPO/.claude/settings.json (merge if it exists):
   }
 }
 
+Verify it took effect:   $DEST/care/deliver.sh "Your name"   (the report says NOT WIRED if it did not)
+
 Then prove it:  $DEST/tests/smoke.sh
-Red team:       python3 $DEST/redteam/attack.py   (103 attacks, executed in a sandbox)
+Red team:       python3 $DEST/redteam/attack.py   (every attack executed in a sandbox)
 CI template:    $DEST/ci/github-guardrails.yml (or gitlab-guardrails.yml)
 Cursor mirror:  copy $DEST/templates/cursor-rules.mdc to .cursor/rules/guardrails.mdc
 Alerts:         set alert_webhook in $DEST/config.json (Slack or Discord incoming webhook)
 Monthly report: $DEST/care/monthly.sh    Release watch: $DEST/care/release_watch.sh
+Handover doc:   $DEST/care/deliver.sh "Client name"   (writes reports/delivery-<date>.md and .html)
 Add guardrails-audit.jsonl to .gitignore unless you want the log committed.
 EOF
