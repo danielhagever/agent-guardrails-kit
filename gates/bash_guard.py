@@ -17,6 +17,8 @@ to be predicted in advance.
 Policy (what is protected, which verbs are read-only) lives in config.json.
 This file contains only the logic that applies it.
 """
+import fnmatch
+import glob as globmod
 import os
 import re
 import shlex
@@ -113,6 +115,8 @@ def secret_mentions(token, vcwd, deep, depth=0):
     """Same walk as mentions_protected, but for the secret list."""
     if touches_secret(token, vcwd):
         return True
+    if glob_reaches(token, vcwd, cfg.get("_secret_abs", [])):
+        return True
     if any(touches_secret(p, vcwd) for p in slash_paths(token)):
         return True
     if "=" in token:
@@ -128,6 +132,54 @@ def secret_mentions(token, vcwd, deep, depth=0):
     if inner == [token]:
         return False
     return any(secret_mentions(t, vcwd, True, depth + 1) for t in inner)
+
+
+def brace_expand(pattern, depth=0):
+    """`protec{t,x}ed/x` is two patterns. The shell knows; the guard has to too."""
+    m = re.search(r"\{([^{}]*,[^{}]*)\}", pattern)
+    if not m or depth > 3:
+        return [pattern]
+    out = []
+    for part in m.group(1).split(","):
+        out += brace_expand(pattern[:m.start()] + part + pattern[m.end():], depth + 1)
+    return out
+
+
+def _pattern_reaches(pattern_abs, target_abs):
+    """True when a glob pattern could match this path, or anything under it.
+
+    Component by component, so `<cwd>/protec*/canary.txt` reaches into
+    `<cwd>/protected`, and `[p]rotected` and `protecte?` do as well.
+    """
+    pc = pattern_abs.split(os.sep)
+    tc = target_abs.split(os.sep)
+    for i in range(min(len(pc), len(tc))):
+        if not fnmatch.fnmatch(tc[i], pc[i]):
+            return False
+    return True
+
+
+def glob_reaches(token, vcwd, targets):
+    """Wildcards hid the path from every check above: rm protec*/canary.txt ran.
+
+    Two passes, because a pattern can be dangerous before it matches anything:
+    what it actually expands to on disk right now, and what it could match
+    given the declared paths.
+    """
+    t = _clean(token)
+    if not t or t.startswith("-") or not re.search(r"[*?\[\]{}]", t):
+        return False
+    for cand in brace_expand(t):
+        try:
+            for hit in globmod.glob(cand, root_dir=vcwd, recursive=True):
+                if any(within(resolve(hit, vcwd), p) for p in targets):
+                    return True
+        except (ValueError, OSError):
+            pass
+        cand_abs = cand if os.path.isabs(cand) else os.path.normpath(os.path.join(vcwd, cand))
+        if any(_pattern_reaches(cand_abs, p) for p in targets):
+            return True
+    return False
 
 
 def slash_paths(token):
@@ -169,6 +221,8 @@ def mentions_protected(token, vcwd, deep, depth=0):
     if any(touches_protected(p, vcwd) for p in slash_paths(token)):
         return True
     if dynamic_near_protected(token, vcwd):
+        return True
+    if glob_reaches(token, vcwd, cfg["_protected_abs"]):
         return True
     # `dd of=protected/x`, `tar --file=protected/x`: the value after the first
     # `=` is a path even though the whole token never resolves to one.

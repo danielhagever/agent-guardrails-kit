@@ -57,7 +57,9 @@ Add to $REPO/.claude/settings.json (merge if it exists):
       { "matcher": "Bash",
         "hooks": [ { "type": "command", "command": "\$CLAUDE_PROJECT_DIR/guardrails/hooks/pre_bash_guard.sh" } ] },
       { "matcher": "Read|Grep|Glob|NotebookRead",
-        "hooks": [ { "type": "command", "command": "\$CLAUDE_PROJECT_DIR/guardrails/hooks/pre_read_guard.sh" } ] }
+        "hooks": [ { "type": "command", "command": "\$CLAUDE_PROJECT_DIR/guardrails/hooks/pre_read_guard.sh" } ] },
+      { "matcher": "mcp__.*",
+        "hooks": [ { "type": "command", "command": "\$CLAUDE_PROJECT_DIR/guardrails/hooks/pre_mcp_guard.sh" } ] }
     ]
   }
 }

@@ -107,6 +107,22 @@
     {
       "pattern": "\\bDROP\\s+(TABLE|DATABASE)\\b",
       "reason": "dropping a table or database"
+    },
+    {
+      "pattern": "\\|\\s*(sudo\\s+)?(ba|z|da|k)?sh\\b(\\s|$)",
+      "reason": "piping text into a shell runs whatever that text turns out to be"
+    },
+    {
+      "pattern": "\\|\\s*(python3?|perl|ruby|node|php)\\s*(-|$)",
+      "reason": "piping text into an interpreter runs whatever that text turns out to be"
+    },
+    {
+      "pattern": "\\beval\\s+[\\\"']?\\$\\(|\\beval\\s+`",
+      "reason": "eval of a command substitution executes text that does not exist yet"
+    },
+    {
+      "pattern": "\\bxargs\\b[^|;]*\\b(ba|z)?sh\\b",
+      "reason": "xargs into a shell runs generated text"
     }
   ],
   "audit_log": ".claude/guardrails-audit.jsonl",

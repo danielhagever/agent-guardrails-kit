@@ -27,6 +27,15 @@
             "command": "$CLAUDE_PROJECT_DIR/hooks/pre_read_guard.sh"
           }
         ]
+      },
+      {
+        "matcher": "mcp__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/hooks/pre_mcp_guard.sh"
+          }
+        ]
       }
     ]
   }
