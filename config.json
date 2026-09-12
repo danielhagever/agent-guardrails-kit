@@ -77,8 +77,8 @@
       "reason": "git clean -f deletes untracked files"
     },
     {
-      "pattern": "\\bgit\\s+(checkout|restore)\\s+(--\\s+)?\\.(\\s|$)",
-      "reason": "discarding every local change in one command"
+      "pattern": "\\bgit\\s+(checkout|restore)\\s+([^\\s|;&]+\\s+)*(--\\s+)?\\.(\\s|$)",
+      "reason": "discarding every local change in one command; a ref in the middle (`git checkout HEAD -- .`) is the same command"
     },
     {
       "pattern": "\\bgit\\s+branch\\s+-D\\b",
@@ -294,5 +294,38 @@
     "PS4",
     "PROMPT_COMMAND"
   ],
-  "_exec_env_comment": "Variables that decide what a command RUNS. Set in front of an ordinary command they are invisible: `PYTHONPATH=work python3 -c 'print(1)'` runs work/sitecustomize.py before the print. Their values are read as payloads: the file they name is scanned, and a directory is checked for the files an interpreter loads by itself. LD_PRELOAD and DYLD_INSERT_LIBRARIES are denied outright; an agent has no reason to set them inline."
+  "_exec_env_comment": "Variables that decide what a command RUNS. Set in front of an ordinary command they are invisible: `PYTHONPATH=work python3 -c 'print(1)'` runs work/sitecustomize.py before the print. Their values are read as payloads: the file they name is scanned, and a directory is checked for the files an interpreter loads by itself. LD_PRELOAD and DYLD_INSERT_LIBRARIES are denied outright; an agent has no reason to set them inline.",
+  "recursive_writers": [
+    "chmod",
+    "chown",
+    "chgrp",
+    "chflags",
+    "chattr",
+    "setfacl",
+    "xattr"
+  ],
+  "_recursive_writers_comment": "Verbs that change every file under a directory. Pointed at a parent of a guarded tree they never name it: `chmod -R 000 .` leaves the protected files unusable and the command mentions nothing but a dot.",
+  "home_execution_surface": [
+    ".claude/settings.json",
+    ".claude/settings.local.json",
+    ".claude/hooks",
+    ".claude/CLAUDE.md",
+    ".claude.json",
+    ".zshrc",
+    ".zshenv",
+    ".zprofile",
+    ".bashrc",
+    ".bash_profile",
+    ".profile",
+    ".config/fish/config.fish",
+    ".gitconfig",
+    ".config/git/config",
+    ".ssh/config",
+    ".ssh/authorized_keys",
+    "Library/LaunchAgents",
+    ".config/systemd/user",
+    ".config/environment.d"
+  ],
+  "_home_execution_surface_comment": "The same idea as execution_surface, outside the repository. Writing ~/.claude/settings.json injects env into every future agent shell, ~/.zshrc runs on the next terminal, ~/.gitconfig can set core.hooksPath for every repo on the machine, and ~/.ssh/config can set a ProxyCommand. Reading them stays allowed. Set protect_home_surface to false to switch this off.",
+  "protect_home_surface": true
 }

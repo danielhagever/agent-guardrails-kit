@@ -69,6 +69,7 @@ wanted = [
     ("Bash", "pre_bash_guard.sh"),
     ("Read|Grep|Glob|NotebookRead", "pre_read_guard.sh"),
     ("mcp__.*", "pre_mcp_guard.sh"),
+    ("*", "pre_any_guard.sh"),
 ]
 for matcher, script in wanted:
     cmd = "$CLAUDE_PROJECT_DIR/guardrails/hooks/" + script
@@ -98,7 +99,9 @@ For reference, this is what was added to $REPO/.claude/settings.json:
       { "matcher": "Read|Grep|Glob|NotebookRead",
         "hooks": [ { "type": "command", "command": "\$CLAUDE_PROJECT_DIR/guardrails/hooks/pre_read_guard.sh" } ] },
       { "matcher": "mcp__.*",
-        "hooks": [ { "type": "command", "command": "\$CLAUDE_PROJECT_DIR/guardrails/hooks/pre_mcp_guard.sh" } ] }
+        "hooks": [ { "type": "command", "command": "\$CLAUDE_PROJECT_DIR/guardrails/hooks/pre_mcp_guard.sh" } ] },
+      { "matcher": "*",
+        "hooks": [ { "type": "command", "command": "\$CLAUDE_PROJECT_DIR/guardrails/hooks/pre_any_guard.sh" } ] }
     ]
   }
 }

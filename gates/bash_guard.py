@@ -416,6 +416,64 @@ def mounts_guarded_tree(verb, toks, vcwd):
     return None
 
 
+
+LIST_FLAGS = {"--files-from", "--config", "--input-file", "--batch-file", "--include-from",
+              "--exclude-from", "--options-file", "--file-from"}
+LIST_FLAGS_BY_VERB = {"curl": {"-K"}, "wget": {"-i"}, "tar": {"-T"}, "bsdtar": {"-T"},
+                      "rsync": {"-T"}, "aria2c": {"-i"}, "yt-dlp": {"-a"}}
+
+
+def instruction_files(verb, toks):
+    """Files handed to a tool as its CONFIG or its list of paths.
+
+    `curl -K work/curlrc` runs whatever that file says, including
+    `output = protected/canary.txt`, and `tar -cf out.tar -T list.txt` archives
+    whatever the list names, including the secret. Neither command contains a
+    guarded path: the paths are in the file, which is round three's lesson
+    arriving through a door round three did not know about. Short flags are
+    scoped by verb, because `-i` means "interactive" to rm and "input file" to
+    wget, and `-T` means nothing to most things.
+    """
+    short = LIST_FLAGS_BY_VERB.get(verb, set())
+    out = []
+    for i, t in enumerate(toks):
+        # `curl -sK file` clusters the flags, so the token is -sK and not -K.
+        # Only a letter at the END of the cluster takes the next word.
+        clustered = any(re.match(rf"^-[A-Za-z]*{re.escape(f[1:])}$", t) for f in short)
+        if t in LIST_FLAGS or clustered:
+            if i + 1 < len(toks):
+                out.append(toks[i + 1])
+        elif "=" in t and t.split("=", 1)[0] in LIST_FLAGS:
+            out.append(t.split("=", 1)[1])
+    return out
+
+
+def modifies_tree_from_above(verb, toks, vcwd):
+    """`chmod -R 000 .` never names the protected tree and ruins every file in it.
+
+    The round-six rule covered recursive READERS, because the question then was
+    a secret leaving. A recursive MODIFIER rooted above the tree is the same
+    geometry pointed the other way: the command says `.`, the damage lands
+    inside.
+    """
+    if verb not in cfg.get("recursive_writers", []):
+        return None
+    flags = [t for t in toks[1:] if t.startswith("-")]
+    if not any(f.startswith("--recursive") or (re.match(r"^-[A-Za-z]+$", f) and "R" in f.upper())
+               for f in flags):
+        return None
+    for t in toks[1:]:
+        if t.startswith("-"):
+            continue
+        start = resolve(_clean(t), vcwd)
+        if not start or not os.path.isdir(start):
+            continue
+        for tree in cfg["_protected_abs"]:
+            if tree != start and within(tree, start):
+                return tree
+    return None
+
+
 def runs_file_contents(verb, toks):
     """Does this command EXECUTE what is in the file, or merely handle the file?
 
@@ -777,6 +835,10 @@ for idx, toks in enumerate(live_segments):
             verdict("deny", f"find starts above {os.path.basename(tree)} and would "
                             f"{'act on' if acting else 'select'} what is inside it; "
                             f"{'secrets are denied to every verb' if is_secret else 'that tree is protected'}")
+    ruined = modifies_tree_from_above(verb, toks, vcwd)
+    if ruined:
+        verdict("deny", f"'{verb}' would change every file under a directory that contains "
+                        f"{os.path.basename(ruined)}, without naming it")
     mounted = mounts_guarded_tree(verb, toks, vcwd)
     if mounted:
         verdict("deny", mounted)
@@ -819,7 +881,8 @@ if not touches:
             continue
         # toks[0] is always read: `./work/z.sh` is the file being run. The rest
         # only when the verb is one that runs, unpacks or applies its arguments.
-        scan = toks if runs_file_contents(verb, toks) else toks[:1]
+        scan = (toks if runs_file_contents(verb, toks)
+                else toks[:1] + instruction_files(verb, toks))
         for tok in scan:
             if script_mentions(tok, session_cwd):
                 verdict("deny", f"'{verb}' would execute {tok[:50]}, whose contents reference a "

@@ -104,7 +104,7 @@ p("- A compromised host. These are hooks, not a sandbox. Unattended runs belong 
   "network path to production.")
 p("- Anything server-side. A force push blocked on a laptop is still worth blocking on the server: branch "
   "protection and a pre-receive hook are the copy that survives a bypassed client.")
-p("- Attacks nobody has written yet. 278 executed attacks and 60 tool-guard cases are tested here, over seven "
+p("- Attacks nobody has written yet. 297 executed attacks and 69 tool-guard cases are tested here, over eight "
   "rounds; the number outstanding is not zero, which is why both red teams ship with the kit and why a "
   "working bypass is welcome as an issue.")
 EOF

@@ -224,6 +224,17 @@ def load_config():
         log = resolve(os.path.expanduser(cfg["audit_log"]), LAB)
         if log and log not in cfg["_protected_abs"]:
             cfg["_protected_abs"].append(log)
+    # Files outside the repository that decide what runs later. ~/.claude/
+    # settings.json can inject an env var into every future agent shell, which
+    # is round seven's whole family delivered through a file the repo rules
+    # never looked at.
+    if cfg.get("protect_home_surface", True):
+        home = os.path.expanduser("~")
+        if home and home != "~":
+            for rel in cfg.get("home_execution_surface", []):
+                r = os.path.realpath(os.path.join(home, rel))
+                if r not in cfg["_protected_abs"]:
+                    cfg["_protected_abs"].append(r)
     cfg["_protected_abs"] += [p for p in cfg["_secret_abs"] if p not in cfg["_protected_abs"]]
     if not cfg["_protected_abs"]:
         die("policy file lists no protected_paths; refusing to run a guard "
@@ -263,6 +274,11 @@ def resolve(path_str, base):
     """
     if not path_str:
         return ""
+    # The shell expands ~ before the command ever runs, so a guard that does not
+    # is comparing a string the kernel will never see. `echo x >> ~/.zshrc`
+    # resolved to <repo>/~/.zshrc and missed the file it was about to change.
+    if path_str.startswith("~"):
+        path_str = os.path.expanduser(path_str)
     p = path_str if os.path.isabs(path_str) else os.path.join(base, path_str)
     try:
         return os.path.realpath(p)
