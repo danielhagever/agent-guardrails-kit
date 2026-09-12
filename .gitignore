@@ -6,3 +6,6 @@ __pycache__/
 reports/
 .last_claude_version
 .release_check.log
+
+# fixture credential: created by the test suite, never committed
+secrets/.env

@@ -168,7 +168,15 @@ def declared_paths(pattern, base):
             return hits
         print(f"guardrails: the policy entry {pattern!r} matches nothing on disk right now; "
               f"it protects a future path only", file=sys.stderr)
-    return [resolve(p, base)]
+    out = [resolve(p, base)]
+    # Keep the path AS WRITTEN as well as where it points. When a declared path
+    # is itself a symlink (infra/prod -> ../real/prod), realpath moves it out of
+    # the repository, and `rm -rf infra` then removes the link while the guard
+    # is watching somewhere else entirely.
+    literal = os.path.normpath(p if os.path.isabs(p) else os.path.join(base, p))
+    if literal not in out:
+        out.append(literal)
+    return out
 
 
 def load_config():
@@ -193,6 +201,12 @@ def load_config():
     cfg["_protected_abs"] = [q for p in cfg["protected_paths"] for q in declared_paths(p, LAB)]
     # Content-is-the-asset paths: every verb is denied on these, reads included.
     cfg["_secret_abs"] = [q for p in cfg.get("secret_paths", []) for q in declared_paths(p, LAB)]
+    # What the CLIENT declared, before the guard adds its own machinery, the
+    # execution surface and the home surface. Some rules have to know the
+    # difference: a branch switch that changes .github/workflows is ordinary
+    # work, and one that changes infra/prod is not.
+    cfg["_declared_abs"] = list(cfg["_protected_abs"]) + [
+        p for p in cfg["_secret_abs"] if p not in cfg["_protected_abs"]]
     # The guard protects itself. An agent that can rewrite config.json or delete
     # gates/bash_guard.py can turn every other rule off, so those paths join the
     # protected list unless the policy switches it off on purpose.

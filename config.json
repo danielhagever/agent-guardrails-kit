@@ -125,11 +125,11 @@
       "reason": "xargs into a shell runs generated text"
     },
     {
-      "pattern": "\\bgit\\s+config\\b[^|;]*\\b(core\\.hookspath|alias\\.|core\\.editor|core\\.pager|sequence\\.editor|core\\.sshcommand|filter\\.[^ ]*\\.(clean|smudge)|diff\\.[^ ]*\\.command)",
+      "pattern": "\\bgit\\s+config\\b[^|;]*\\b(core\\.hookspath|alias\\.|core\\.editor|core\\.pager|sequence\\.editor|core\\.sshcommand|filter\\.[^ ]*\\.(clean|smudge)|diff\\.[^ ]*\\.command|protocol\\.[^ ]*\\.allow|url\\.[^ ]*\\.insteadof)",
       "reason": "this git config key decides what git EXECUTES, so setting it is a way to run code later"
     },
     {
-      "pattern": "\\bgit\\b[^|;]*\\s-c\\s+[^\\s]*(core\\.hookspath|alias\\.|core\\.editor|core\\.pager|sequence\\.editor|core\\.sshcommand|filter\\.[^ ]*\\.(clean|smudge)|diff\\.[^ ]*\\.command|diff\\.external)",
+      "pattern": "\\bgit\\b[^|;]*\\s-c\\s+[^\\s]*(core\\.hookspath|alias\\.|core\\.editor|core\\.pager|sequence\\.editor|core\\.sshcommand|filter\\.[^ ]*\\.(clean|smudge)|diff\\.[^ ]*\\.command|diff\\.external|protocol\\.[^ ]*\\.allow|url\\.[^ ]*\\.insteadof)",
       "reason": "git -c sets the same keys as git config, for one command, and those keys decide what git EXECUTES"
     },
     {
@@ -218,7 +218,13 @@
     "launchctl",
     "schtasks",
     "screen",
-    "tmux"
+    "tmux",
+    "just",
+    "task",
+    "mask",
+    "mage",
+    "pip",
+    "pip3"
   ],
   "_interpreter_comment": "Verbs whose arguments are executable payloads. Their quoted arguments are re-lexed and scanned for bare protected names, which is how `sh -c 'rm secrets'` is caught. Add any interpreter your team uses. Editors belong here too: vim -S, ex -c and sed -f all take a file of COMMANDS, which is a program by another name. And anything that runs a command LATER or on your behalf: at, batch, crontab, systemd-run, setsid, flock. `at -f work/go.sh` handed the file to a scheduler and nothing in the command line said what was in it.",
   "secret_paths": [
@@ -248,7 +254,8 @@
     ".devcontainer",
     ".hooks",
     ".lefthook.yml",
-    ".githooks"
+    ".githooks",
+    ".gitmodules"
   ],
   "_execution_surface_comment": "Files nobody runs on purpose and everybody runs anyway: a git hook fires on the next commit, a workflow on the next push, CLAUDE.md steers the agent itself. Writing to them is denied even though the canary is untouched, because the damage happens later and somewhere else. Reading stays allowed. Resolved against the project root, so an installed copy protects the repo's files, not the kit's. package.json and Makefile are deliberately NOT here: an agent adding a dependency edits package.json every day, so listing it would get the whole policy switched off. Add it yourself if your team's scripts are the thing you are protecting. Round nine added the ones a JavaScript or Python repo actually runs: .husky (git hooks installed by npm), .pre-commit-config.yaml, Taskfile/Justfile, .devcontainer, .vscode/settings.json. conftest.py, Makefile and package.json are deliberately NOT here, because a developer edits those daily; add them yourself if the agent has no business touching your test or build plumbing.",
   "protect_execution_surface": true,
@@ -268,9 +275,18 @@
     "tar",
     "zip",
     "7z",
-    "jar"
+    "jar",
+    "aws",
+    "gcloud",
+    "gsutil",
+    "az",
+    "rclone",
+    "s3cmd",
+    "b2",
+    "doctl",
+    "wrangler"
   ],
-  "_recursive_readers_comment": "Verbs that walk a whole tree. Pointed at a directory ABOVE a secret path they read it without ever naming it: `grep -r KEY .` and `tar -cf out.tar .` were both allowed until round six. An --exclude-dir / --exclude naming the secret re-allows them.",
+  "_recursive_readers_comment": "Verbs that walk a whole tree. Pointed at a directory ABOVE a secret path they read it without ever naming it: `grep -r KEY .` and `tar -cf out.tar .` were both allowed until round six. An --exclude-dir / --exclude naming the secret re-allows them. The cloud CLIs are here too: `aws s3 sync .` and `gsutil rsync -r .` upload the whole directory, secret included, and neither command names a file.",
   "exec_env_vars": [
     "BASH_ENV",
     "ENV",

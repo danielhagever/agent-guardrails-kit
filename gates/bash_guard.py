@@ -23,6 +23,7 @@ import json
 import os
 import re
 import shlex
+import subprocess
 import sys
 import time
 
@@ -357,6 +358,33 @@ def glob_reaches(token, vcwd, targets):
     return False
 
 
+
+def _token_hits(tok, bases, destructive_line):
+    """One token from a file the command will run, judged like a command token.
+
+    These files are not always shell. A Taskfile says `cmds: [rm -rf infra]`,
+    so the token arrives as `infra]` and resolves to nothing; JSON and YAML
+    bring their own punctuation to every path.
+    """
+    for candidate in {tok, tok.strip("[](){},'\";")}:
+        if candidate and candidate != tok and _token_hits_one(candidate, bases, destructive_line):
+            return True
+    return _token_hits_one(tok, bases, destructive_line)
+
+
+def _token_hits_one(tok, bases, destructive_line):
+    for base in bases:
+        if mentions_protected(tok, base, True):
+            return True
+        if cfg.get("_secret_abs") and secret_mentions(tok, base, True):
+            return True
+        if destructive_line and wipes_guarded_tree(tok, base):
+            # round ten, one level of indirection away: a recipe that says
+            # `rm -rf infra` names nothing guarded and removes infra/prod.
+            return True
+    return False
+
+
 def script_mentions(path_token, vcwd, seen=None):
     """Read the file a command is about to execute, and judge its contents.
 
@@ -397,12 +425,11 @@ def script_mentions(path_token, vcwd, seen=None):
         line = line.strip().lstrip("\t")
         if not line or line.startswith("#"):
             continue
+        destructive_line = bool(DESTRUCTIVE_WORDS.search(line))
         for piece in re.split(r"[;&|]+", line):
             for tok in re.findall(r"[^\s'\"]+|'[^']*'|\"[^\"]*\"", piece):
-                for base in bases:
-                    if mentions_protected(tok, base, True) or (
-                            cfg.get("_secret_abs") and secret_mentions(tok, base, True)):
-                        return True
+                if _token_hits(tok, bases, destructive_line):
+                    return True
     return False
 
 
@@ -411,12 +438,11 @@ def _scan_text(text, bases):
         line = line.strip().lstrip("\t")
         if not line or line.startswith("#"):
             continue
+        destructive_line = bool(DESTRUCTIVE_WORDS.search(line))
         for piece in re.split(r"[;&|]+", line):
             for tok in re.findall(r"[^\s'\"]+|'[^']*'|\"[^\"]*\"", piece):
-                for base in bases:
-                    if mentions_protected(tok, base, True) or (
-                            cfg.get("_secret_abs") and secret_mentions(tok, base, True)):
-                        return True
+                if _token_hits(tok, bases, destructive_line):
+                    return True
     return False
 
 
@@ -443,8 +469,53 @@ def npm_or_make_target(toks, vcwd):
             scripts = json.load(open(pkg, encoding="utf-8")).get("scripts", {})
         except (ValueError, OSError):
             return False
-        targets = [scripts[w] for w in wanted if w in scripts] or list(scripts.values())[:0]
+        targets = [scripts[w] for w in wanted if w in scripts]
+        # `npm install` runs preinstall/install/postinstall/prepare without any
+        # of them being named on the command line. That is how a package.json
+        # the agent just wrote gets to run.
+        if any(w in ("install", "ci", "i", "add", "update", "up", "rebuild") for w in wanted) or not wanted:
+            targets += [scripts[k] for k in ("preinstall", "install", "postinstall", "prepare",
+                                             "prepublish", "prepublishOnly") if k in scripts]
         return any(_scan_text(t, [prefix, vcwd]) for t in targets)
+    if verb in ("pip", "pip3", "uv", "poetry", "pipx") and "install" in args:
+        for a in args:
+            if a.startswith("-"):
+                continue
+            d = resolve(_clean(a), vcwd)
+            if d and os.path.isdir(d):
+                # a local project: pip runs its setup.py to build it
+                for build_file in ("setup.py", "pyproject.toml", "setup.cfg"):
+                    if script_mentions(os.path.join(d, build_file), vcwd):
+                        return True
+        return False
+    if verb in ("just", "task", "mask", "mage"):
+        # Justfile recipes have Makefile shape; Taskfile is YAML with the same
+        # idea. Only the recipe that was asked for is read, as with make.
+        names = {"just": ("Justfile", "justfile", ".justfile"),
+                 "task": ("Taskfile.yml", "Taskfile.yaml", "taskfile.yml"),
+                 "mask": ("maskfile.md",), "mage": ("magefile.go",)}[verb]
+        path = next((resolve(n, vcwd) for n in names if os.path.isfile(resolve(n, vcwd))), "")
+        if not path:
+            return False
+        try:
+            text = open(path, encoding="utf-8", errors="ignore").read()
+        except OSError:
+            return False
+        wanted = [a for a in args if not a.startswith("-")]
+        blocks, current = {}, None
+        for line in text.splitlines():
+            m = re.match(r"^\s{0,4}([A-Za-z0-9_.\-]+):\s*$", line) or \
+                re.match(r"^([A-Za-z0-9_.\-]+)\s*:(?!=)", line)
+            if m and not line.startswith(("\t", "    #")):
+                current = m.group(1)
+                blocks.setdefault(current, [])
+            elif current and (line.startswith(("\t", "  ")) or line.strip().startswith("-")):
+                blocks[current].append(line.strip())
+            elif not line.strip():
+                current = None
+        chosen = [w for w in wanted if w in blocks] or (list(blocks)[:1] if not wanted else [])
+        return any(_scan_text("\n".join(blocks.get(t, [])), [os.path.dirname(path), vcwd])
+                   for t in chosen)
     if verb in ("make", "gmake"):
         mk, wanted = "Makefile", []
         skip = False
@@ -637,6 +708,157 @@ def modifies_tree_from_above(verb, toks, vcwd):
     return None
 
 
+
+STATIC_SERVERS = ("http.server", "simplehttpserver", "rangehttpserver", "serve", "http-server",
+                  "miniserve", "darkhttpd", "file-server", "sirv", "static-server")
+
+
+def serves_directory(verb, toks):
+    """`python3 -m http.server` hands the whole tree to anyone who connects.
+
+    No path in the command, no verb that writes, nothing to resolve: the
+    directory it serves is simply where it was started. The served root is
+    returned so the ancestor rule can be applied to it.
+    """
+    joined = " ".join(toks).lower()
+    hit = any(srv in joined for srv in STATIC_SERVERS)
+    if verb in ("php",) and "-s" in [t.lower() for t in toks]:
+        hit = True
+    if verb == "ruby" and "httpd" in joined:
+        hit = True
+    if verb == "caddy" and "file-server" in joined:
+        hit = True
+    if not hit:
+        return None
+    root = "."
+    for i, t in enumerate(toks):
+        if t in ("-d", "--directory", "--root", "-t") and i + 1 < len(toks):
+            root = toks[i + 1]
+        elif t.startswith("--directory="):
+            root = t.split("=", 1)[1]
+    return root
+
+
+_TRACKED = "unknown"
+
+
+def tracked_secret(vcwd):
+    """Is a declared secret actually committed? Asked once, and only when it matters.
+
+    Everything in this family turns on that question. If the answer is no, git
+    cannot leak the file and none of these rules should fire; if it is yes, the
+    repository itself is a copy of the credential and .git is a second one.
+    """
+    global _TRACKED
+    if _TRACKED != "unknown":
+        return _TRACKED
+    _TRACKED = None
+    for sec in cfg.get("_secret_abs", []):
+        try:
+            r = subprocess.run(["git", "-C", vcwd, "ls-files", "--error-unmatch", "--", sec],
+                               capture_output=True, timeout=5)
+        except (OSError, subprocess.SubprocessError):
+            break
+        if r.returncode == 0:
+            _TRACKED = sec
+            break
+    return _TRACKED
+
+
+def git_reads_history(verb, toks, vcwd):
+    """git is a reader of its own history, and a committed secret is in there.
+
+    `git grep KEY`, `git log -p` and `git show HEAD:cfg/.env` print file
+    contents while naming no path this guard recognises. They can only leak a
+    secret that was committed, so the check is exactly that: ask git whether a
+    declared secret path is tracked, and refuse these subcommands only then.
+    A repository that never committed its .env is left alone entirely.
+    """
+    if verb != "git" or not cfg.get("_secret_abs"):
+        return None
+    sub = next((t for t in toks[1:] if not t.startswith("-")), "")
+    if sub not in ("grep", "show", "log", "diff", "cat-file", "stash", "whatchanged",
+                   "format-patch", "clone", "archive", "bundle", "worktree", "push"):
+        return None
+    if sub in ("log", "diff", "whatchanged") and not any(
+            t in ("-p", "-u", "--patch", "--full-diff") for t in toks):
+        return None            # `git log` without a patch prints no file content
+    return tracked_secret(vcwd)
+
+
+
+def docker_context_holds_secret(verb, toks, vcwd):
+    """`docker build .` uploads the whole directory to the daemon, secret and all.
+
+    The context is whatever directory it is pointed at, and nothing in the
+    command names a file. A .dockerignore that excludes the secret is the
+    project's own answer to this, so it is honoured.
+    """
+    if verb not in ("docker", "podman", "nerdctl", "buildah", "finch") or not cfg.get("_secret_abs"):
+        return None
+    if "build" not in toks[1:3] and "buildx" not in toks[1:3]:
+        return None
+    ctx = "."
+    for t in reversed(toks[1:]):
+        if not t.startswith("-") and t not in ("build", "buildx", "docker"):
+            ctx = t
+            break
+    root = resolve(_clean(ctx), vcwd)
+    if not root or not os.path.isdir(root):
+        return None
+    ignored = ""
+    try:
+        with open(os.path.join(root, ".dockerignore"), encoding="utf-8", errors="ignore") as f:
+            ignored = f.read()
+    except OSError:
+        pass
+    for sec in cfg["_secret_abs"]:
+        if not within(sec, root) or sec == root:
+            continue
+        rel = os.path.relpath(sec, root)
+        names = {rel, rel.rstrip("/") + "/", os.path.basename(sec), os.path.dirname(rel),
+                 os.path.dirname(rel) + "/"}
+        if any(line.strip() and line.strip() in names for line in ignored.splitlines()):
+            continue
+        return sec
+    return None
+
+
+def git_ref_changes_guarded(verb, toks, vcwd):
+    """A branch switch or a merge rewrites the working tree without naming a file.
+
+    `git checkout other` where that branch never had infra/prod deletes it on
+    the way. Asked precisely rather than guessed: does the tree at that ref
+    differ from HEAD at a guarded path? A branch that does not touch it is
+    ordinary work and stays allowed.
+    """
+    if verb != "git":
+        return None
+    subs = [t for t in toks[1:] if not t.startswith("-")]
+    if not subs or subs[0] not in ("checkout", "switch", "merge", "rebase", "pull",
+                                   "cherry-pick", "revert"):
+        return None
+    ref = subs[1] if len(subs) > 1 else ("@{u}" if subs[0] == "pull" else "")
+    if not ref or "-b" in toks or "--orphan" in toks:
+        return None
+    for tree in cfg.get("_declared_abs", cfg["_protected_abs"])[:8]:
+        if not within(tree, resolve(".", vcwd)):
+            continue
+        try:
+            # HEAD against the ref, not the working tree against the ref: an
+            # uncommitted edit inside a declared path is not a reason to refuse
+            # every branch switch, and git refuses by itself when a switch
+            # would overwrite local changes.
+            r = subprocess.run(["git", "-C", vcwd, "diff", "--name-only", "HEAD", ref, "--",
+                                os.path.relpath(tree, resolve(".", vcwd))],
+                               capture_output=True, text=True, timeout=6)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if r.returncode == 0 and r.stdout.strip():
+            return tree
+    return None
+
+
 def runs_file_contents(verb, toks):
     """Does this command EXECUTE what is in the file, or merely handle the file?
 
@@ -663,8 +885,18 @@ def runs_file_contents(verb, toks):
 
 
 def slash_paths(token):
-    """Path-like substrings (they contain a separator) inside a token."""
-    return re.findall(r"[A-Za-z0-9_.~@%+=:,\-]*(?:/[A-Za-z0-9_.~@%+=:,\-]+)+/?", token)
+    """Path-like substrings (they contain a separator) inside a token.
+
+    `git show HEAD:cfg/.env` puts a ref in front of the path with a colon
+    between them, and the whole thing resolves to nothing, so the secret was
+    invisible. Anything after a colon is offered as a path of its own.
+    """
+    found = re.findall(r"[A-Za-z0-9_.~@%+=:,\-]*(?:/[A-Za-z0-9_.~@%+=:,\-]+)+/?", token)
+    out = list(found)
+    for f in found:
+        if ":" in f:
+            out.append(f.rsplit(":", 1)[1])
+    return [f for f in out if f]
 
 
 def dynamic_near_protected(token, vcwd):
@@ -731,7 +963,9 @@ def mentions_protected(token, vcwd, deep, depth=0):
 
 
 ALWAYS_RECURSIVE = {"rg", "ag", "ack", "rsync", "ditto", "cpio", "scp", "sftp",
-                    "tar", "zip", "7z", "jar"}
+                    "tar", "zip", "7z", "jar",
+                    # the cloud CLIs take a directory and walk it themselves
+                    "aws", "gcloud", "gsutil", "az", "rclone", "s3cmd", "b2", "doctl", "wrangler"}
 COPY_LIKE = {"cp", "rsync", "scp", "ditto", "install", "mv", "cpio"}
 EXCLUDE_FLAGS = ("--exclude", "--exclude-dir", "--ignore", "--ignore-dir")
 
@@ -806,6 +1040,15 @@ def reads_tree_from_above(verb, toks, vcwd):
         for sec in cfg["_secret_abs"]:
             if sec != s and within(sec, s) and not _excluded(sec, excl, vcwd):
                 return sec
+        # A committed secret lives in .git as well as in the working tree, so
+        # `tar -cf out.tar .git` and `cp -R .git elsewhere` are copies of it.
+        # Only for verbs that take the whole tree away: git objects are
+        # compressed, so a text search cannot read one, and denying `grep -r`
+        # over the repository for that reason would be a false positive.
+        if verb in ("cp", "rsync", "scp", "ditto", "cpio", "tar", "zip", "7z", "jar", "sftp"):
+            gd = resolve(".git", vcwd)
+            if gd and (s == gd or within(gd, s)) and tracked_secret(vcwd):
+                return tracked_secret(vcwd)
     return None
 
 
@@ -1030,6 +1273,10 @@ for idx, toks in enumerate(live_segments):
     # interpreter counts as destructive when its payload says so.
     destructive = verb in cfg.get("destructive_verbs", []) or (
         deep and bool(DESTRUCTIVE_WORDS.search(" ".join(toks[1:]))))
+    # rsync only destroys when told to, and then it destroys a whole tree.
+    if verb in ("rsync", "rclone") and any(
+            t.startswith("--delete") or t == "--remove-source-files" for t in toks):
+        destructive = True
     any_destructive = any_destructive or destructive
     for d in path_dirs:
         # `PATH=work:$PATH rmx` runs work/rmx and says nothing about it.
@@ -1043,6 +1290,29 @@ for idx, toks in enumerate(live_segments):
 
     segments.append((verb, toks, " ".join(toks)[:70]))
 
+    served = serves_directory(verb, toks)
+    if served is not None:
+        root = resolve(_clean(served), vcwd)
+        for sec in cfg.get("_secret_abs", []):
+            if root and (within(sec, root) or within(root, sec)):
+                verdict("deny", f"this command serves {served} over the network, and "
+                                f"{os.path.basename(sec)} is inside it; anyone who can reach the "
+                                f"port can read it")
+    ctx_secret = docker_context_holds_secret(verb, toks, vcwd)
+    if ctx_secret:
+        verdict("deny", f"the build context includes {os.path.basename(ctx_secret)}, which is "
+                        f"uploaded to the build daemon and can end up in an image layer; add it to "
+                        f".dockerignore or build from a directory that does not contain it")
+    ref_hits = git_ref_changes_guarded(verb, toks, vcwd)
+    if ref_hits:
+        verdict("deny", f"that ref differs from HEAD inside {os.path.basename(ref_hits)}, so this "
+                        f"command would rewrite the guarded tree without naming a file in it")
+    tracked = git_reads_history(verb, toks, vcwd)
+    if tracked:
+        verdict("deny", f"{os.path.basename(tracked)} is COMMITTED to this repository, so this git "
+                        f"command would carry it out of history (print it, copy it, or publish it). "
+                        f"Rotate that credential and purge it from history; a hook cannot unpublish "
+                        f"what git has already stored")
     reached = reads_tree_from_above(verb, toks, vcwd)
     if reached:
         verdict("deny", f"'{verb}' would walk into {os.path.basename(reached)} from a directory "

@@ -27,6 +27,7 @@ sec = {R(p) for p in c.get('secret_paths', [])}
 print(next((R(p) for p in c['protected_paths'] if R(p) not in sec), ''))")
 FIRST_N=$(basename "$FIRST"); READABLE_N=$(basename "$READABLE")
 mkdir -p "$G/scratch"
+[ -d "$G/secrets" ] && [ ! -f "$G/secrets/.env" ] && printf 'FIXTURE=not-a-real-key\n' > "$G/secrets/.env"
 
 printf '%s' "$(j Write "{\"file_path\":\"$FIRST\"}")" | "$G/hooks/pre_write_guard.sh" 2>/dev/null >/dev/null
 check "write into protected ($FIRST_N) blocked" 2 $?
