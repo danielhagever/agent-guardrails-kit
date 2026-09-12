@@ -35,6 +35,20 @@ def build():
     open(os.path.join(d, "protected", "canary.txt"), "w").write("CANARY\n")
     open(os.path.join(d, "secrets", ".env"), "w").write("KEY=live\n")
     open(os.path.join(d, "work", "ok.txt"), "w").write("fine\n")
+    # second names for guarded files: same inode, a path that looks like work
+    os.link(os.path.join(d, "protected", "canary.txt"), os.path.join(d, "work", "hardlink"))
+    os.link(os.path.join(d, "secrets", ".env"), os.path.join(d, "work", "hardsecret"))
+    # binary content the Bash guard reads on purpose (it scans what a command
+    # will execute or unpack). A NUL byte in here used to kill the gate.
+    open(os.path.join(d, "work", "binary.sh"), "wb").write(b"#!/bin/sh\nls \x00\x01 work\n")
+    import tarfile, io
+    with tarfile.open(os.path.join(d, "work", "binary.tar"), "w") as tf:
+        info = tarfile.TarInfo("payload"); blob = b"\x00\x01\x02binary\n"; info.size = len(blob)
+        tf.addfile(info, io.BytesIO(blob))
+    # a wide tree, so a pathological glob has something to chew on
+    for i in range(300):
+        os.makedirs(os.path.join(d, "work", "tree", f"d{i}", f"e{i}"), exist_ok=True)
+        open(os.path.join(d, "work", "tree", f"d{i}", f"e{i}", "f.txt"), "w").write("x")
     for part in ("gates", "hooks"):
         shutil.rmtree(os.path.join(d, part), ignore_errors=True)
         shutil.copytree(os.path.join(KIT, part), os.path.join(d, part))
@@ -129,6 +143,31 @@ CASES = [
     ("Write: 100KB path", "pre_write_guard.sh", "Write", {"file_path": "work/" + "a" * 100000}, "any"),
     ("MCP: 3000 strings in the payload", "pre_mcp_guard.sh", "mcp__x__y",
      {"items": [f"work/f{i}.txt" for i in range(3000)]}, "any"),
+    # --- round six: second names, binary content, and the clock
+    ("Write through a hard link to a protected file", "pre_write_guard.sh", "Write",
+     {"file_path": "work/hardlink"}, "deny"),
+    ("Edit through a hard link to a protected file", "pre_write_guard.sh", "Edit",
+     {"file_path": "work/hardlink", "old_string": "CANARY", "new_string": "PWNED"}, "deny"),
+    ("Read through a hard link to a secret", "pre_read_guard.sh", "Read",
+     {"file_path": "work/hardsecret"}, "deny"),
+    ("Grep a directory holding a hard link to a secret", "pre_read_guard.sh", "Grep",
+     {"pattern": "KEY", "path": "work/hardsecret"}, "deny"),
+    ("MCP through a hard link to a secret", "pre_mcp_guard.sh", "mcp__fs__read",
+     {"path": "work/hardsecret"}, "deny"),
+    ("Write to an ordinary work file (must pass)", "pre_write_guard.sh", "Write",
+     {"file_path": "work/ok.txt"}, "allow"),
+    ("Bash: unpack an archive full of NUL bytes", "pre_bash_guard.sh", "Bash",
+     {"command": "tar -xf work/binary.tar -C work"}, "any"),
+    ("Bash: run a script with a NUL byte in it", "pre_bash_guard.sh", "Bash",
+     {"command": "sh work/binary.sh"}, "any"),
+    ("Bash: twelve nested ** globs over 600 directories", "pre_bash_guard.sh", "Bash",
+     {"command": "rm " + "**/" * 12 + "*.txt"}, "any"),
+    ("Bash: a brace bomb", "pre_bash_guard.sh", "Bash",
+     {"command": "rm " + "{a,b}" * 14 + ".txt"}, "any"),
+    ("Bash: a glob over the whole tree", "pre_bash_guard.sh", "Bash",
+     {"command": "ls work/tree/*/*/*.txt"}, "any"),
+    ("Write: path with a NUL byte", "pre_write_guard.sh", "Write",
+     {"file_path": "work/a\x00/../../protected/canary.txt"}, "deny"),
 ]
 
 
@@ -144,6 +183,11 @@ def main():
             ok = not crashed          # only a crash or a hang is a failure here
         else:
             ok = got == expect
+        if secs > 5:
+            # Slowness is not a nuisance here, it is the same bug as a crash:
+            # the runtime stops waiting, calls the gate broken, and the tool
+            # call proceeds. Every input in this file must be decided fast.
+            ok = False
         if not ok:
             bad += 1
         rows.append((label, expect, got, f"{secs}s", "ok" if ok else "FAIL"))
@@ -156,7 +200,8 @@ def main():
         mark = "" if res == "ok" else "   <<<"
         print(f"{label.ljust(width)}  {expect:6} {got:6} {secs:7} {res}{mark}")
     slow = [r for r in rows if float(r[3][:-1]) > 5]
-    print(f"\n{len(rows)} cases, {bad} failures, {len(slow)} slower than five seconds")
+    print(f"\n{len(rows)} cases, {bad} failures, {len(slow)} slower than five seconds "
+          f"(slow counts as a failure: a gate the runtime gives up on does not block anything)")
     return 1 if bad else 0
 
 

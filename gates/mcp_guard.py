@@ -15,10 +15,11 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _lib import (abs_pattern, clean_uri, in_any_protected,  # noqa: E402
+from _lib import (abs_pattern, clean_uri, deadline, in_any_protected,  # noqa: E402
                   load_config, pattern_reaches, read_hook_input, resolve,
-                  verdict, within)
+                  shares_inode, verdict, within)
 
+deadline(8)
 cfg = load_config()
 data = read_hook_input()
 tool = data.get("tool_name", "") or "an MCP tool"
@@ -52,6 +53,9 @@ for raw in candidates:
     if not stem or stem.startswith("-"):
         continue
     rp = resolve(stem, cwd)
+    if shares_inode(rp, SECRETS) or shares_inode(rp, cfg["_protected_abs"]):
+        verdict("deny", f"{tool} was given a hard link to a guarded file ({raw[:60]}); "
+                        f"a second name for the same inode is the same file")
     if any(within(rp, s) or within(s, rp) for s in SECRETS):
         verdict("deny", f"{tool} was given a path inside a secret ({raw[:60]}); "
                         f"secrets are denied to every tool, MCP servers included")

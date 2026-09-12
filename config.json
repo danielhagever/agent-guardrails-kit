@@ -187,9 +187,32 @@
     "ssh",
     "docker",
     "kubectl",
-    "git-bash"
+    "git-bash",
+    "vim",
+    "vi",
+    "nvim",
+    "view",
+    "ex",
+    "ed",
+    "emacs",
+    "sed",
+    "gsed",
+    "at",
+    "batch",
+    "crontab",
+    "systemd-run",
+    "setsid",
+    "flock",
+    "nice",
+    "ionice",
+    "script",
+    "caffeinate",
+    "launchctl",
+    "schtasks",
+    "screen",
+    "tmux"
   ],
-  "_interpreter_comment": "Verbs whose arguments are executable payloads. Their quoted arguments are re-lexed and scanned for bare protected names, which is how `sh -c 'rm secrets'` is caught. Add any interpreter your team uses.",
+  "_interpreter_comment": "Verbs whose arguments are executable payloads. Their quoted arguments are re-lexed and scanned for bare protected names, which is how `sh -c 'rm secrets'` is caught. Add any interpreter your team uses. Editors belong here too: vim -S, ex -c and sed -f all take a file of COMMANDS, which is a program by another name. And anything that runs a command LATER or on your behalf: at, batch, crontab, systemd-run, setsid, flock. `at -f work/go.sh` handed the file to a scheduler and nothing in the command line said what was in it.",
   "secret_paths": [
     "secrets"
   ],
@@ -208,6 +231,25 @@
     ".claude",
     ".vscode/tasks.json"
   ],
-  "_execution_surface_comment": "Files nobody runs on purpose and everybody runs anyway: a git hook fires on the next commit, a workflow on the next push, CLAUDE.md steers the agent itself. Writing to them is denied even though the canary is untouched, because the damage happens later and somewhere else. Reading stays allowed. Resolved against the project root, so an installed copy protects the repo's files, not the kit's.",
-  "protect_execution_surface": true
+  "_execution_surface_comment": "Files nobody runs on purpose and everybody runs anyway: a git hook fires on the next commit, a workflow on the next push, CLAUDE.md steers the agent itself. Writing to them is denied even though the canary is untouched, because the damage happens later and somewhere else. Reading stays allowed. Resolved against the project root, so an installed copy protects the repo's files, not the kit's. package.json and Makefile are deliberately NOT here: an agent adding a dependency edits package.json every day, so listing it would get the whole policy switched off. Add it yourself if your team's scripts are the thing you are protecting.",
+  "protect_execution_surface": true,
+  "recursive_readers": [
+    "grep",
+    "egrep",
+    "fgrep",
+    "rg",
+    "ag",
+    "ack",
+    "cp",
+    "rsync",
+    "scp",
+    "sftp",
+    "ditto",
+    "cpio",
+    "tar",
+    "zip",
+    "7z",
+    "jar"
+  ],
+  "_recursive_readers_comment": "Verbs that walk a whole tree. Pointed at a directory ABOVE a secret path they read it without ever naming it: `grep -r KEY .` and `tar -cf out.tar .` were both allowed until round six. An --exclude-dir / --exclude naming the secret re-allows them."
 }

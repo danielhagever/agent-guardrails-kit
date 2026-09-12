@@ -24,12 +24,14 @@ import os
 import re
 import shlex
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _lib import (abs_pattern, clean_uri, in_any_protected,  # noqa: E402
+from _lib import (abs_pattern, clean_uri, deadline, in_any_protected,  # noqa: E402
                   load_config, pattern_reaches, read_hook_input, resolve,
-                  verdict, within)
+                  shares_inode, verdict, within)
 
+deadline(8)
 cfg = load_config()
 data = read_hook_input()
 
@@ -82,7 +84,8 @@ def touches_protected(token, vcwd):
     t = _clean(token)
     if not t or t.startswith("-"):
         return False
-    return in_any_protected(resolve(t, vcwd), cfg)
+    r = resolve(t, vcwd)
+    return in_any_protected(r, cfg) or shares_inode(r, cfg["_protected_abs"])
 
 
 def touches_secret(token, vcwd):
@@ -90,7 +93,8 @@ def touches_secret(token, vcwd):
     if not t or t.startswith("-"):
         return False
     r = resolve(t, vcwd)
-    return any(within(r, s) for s in cfg.get("_secret_abs", []))
+    return (any(within(r, s) for s in cfg.get("_secret_abs", []))
+            or shares_inode(r, cfg.get("_secret_abs", [])))
 
 
 # A literal absolute mention catches payloads handed to interpreters
@@ -166,15 +170,26 @@ def glob_reaches(token, vcwd, targets):
     if not t or t.startswith("-") or not re.search(r"[*?\[\]{}]", t):
         return False
     for cand in brace_expand(t):
-        try:
-            for hit in globmod.glob(cand, root_dir=vcwd, recursive=True):
-                if any(within(resolve(hit, vcwd), p) for p in targets):
-                    return True
-        except (ValueError, OSError):
-            pass
         cand_abs = abs_pattern(cand, vcwd)
         if any(pattern_reaches(cand_abs, p) for p in targets):
             return True
+        # `rm **/**/**/**/*.txt` made the guard take eight seconds on 600
+        # directories, and minutes on a real repository with node_modules. A
+        # gate that slow is a gate the runtime gives up on, and giving up does
+        # not stop the tool call, so a pathological pattern was a bypass. The
+        # static check above already answers every `**` correctly, so the walk
+        # is skipped for those and time-boxed for the rest.
+        if cand.count("**") > 1:
+            continue
+        started = time.monotonic()
+        try:
+            for n, hit in enumerate(globmod.iglob(cand, root_dir=vcwd, recursive=True)):
+                if any(within(resolve(hit, vcwd), p) for p in targets):
+                    return True
+                if n > 20_000 or (n % 256 == 0 and time.monotonic() - started > 1.5):
+                    break
+        except (ValueError, OSError):
+            pass
     return False
 
 
@@ -204,6 +219,11 @@ def script_mentions(path_token, vcwd, seen=None):
             text = f.read()
     except OSError:
         return False
+    # Archives and other binaries are read here on purpose (a tar header names
+    # its entries in plain text, which is how zip-slip is caught). They also
+    # contain NUL bytes, and a NUL inside a path raises in os.path.realpath:
+    # the gate died, and a dead gate does not stop the tool call.
+    text = text.replace("\x00", " ")
     bases = [vcwd, os.path.dirname(p)]
     for line in text.splitlines():
         # a diff names its target as a/path and b/path; git apply strips those,
@@ -296,6 +316,31 @@ def npm_or_make_target(toks, vcwd):
     return False
 
 
+def runs_file_contents(verb, toks):
+    """Does this command EXECUTE what is in the file, or merely handle the file?
+
+    Round three taught the guard to read the file a command runs, because
+    `echo 'rm protected/x' > work/go.sh; sh work/go.sh` mentions nothing
+    protected. It then read that file for EVERY verb, which is how `cat
+    README.md` came to be denied in a repository whose README simply names the
+    protected directory in prose. That is the false positive that gets a guard
+    switched off, so the scan is now scoped to commands that actually run,
+    unpack or apply what they are given.
+    """
+    if verb in INTERPRETERS:
+        return True
+    flags = [t for t in toks[1:] if t.startswith("-")]
+    if verb in ("unzip", "unar", "patch"):
+        return True
+    if verb in ("tar", "bsdtar", "jar", "cpio", "7z", "7za"):
+        # extracting reads the entry names OUT of the archive; creating one
+        # only reads ordinary files, whose prose is nobody's business
+        return any(re.search(r"[xi]", f) for f in flags)
+    if verb == "git" and "apply" in toks[1:3]:
+        return True
+    return False
+
+
 def slash_paths(token):
     """Path-like substrings (they contain a separator) inside a token."""
     return re.findall(r"[A-Za-z0-9_.~@%+=:,\-]*(?:/[A-Za-z0-9_.~@%+=:,\-]+)+/?", token)
@@ -363,6 +408,197 @@ def mentions_protected(token, vcwd, deep, depth=0):
     return any(mentions_protected(t, vcwd, True, depth + 1) for t in inner)
 
 
+
+ALWAYS_RECURSIVE = {"rg", "ag", "ack", "rsync", "ditto", "cpio", "scp", "sftp",
+                    "tar", "zip", "7z", "jar"}
+COPY_LIKE = {"cp", "rsync", "scp", "ditto", "install", "mv", "cpio"}
+EXCLUDE_FLAGS = ("--exclude", "--exclude-dir", "--ignore", "--ignore-dir")
+
+
+def _exclusion_values(toks):
+    """What the command already promised not to look at."""
+    out = []
+    for i, t in enumerate(toks):
+        if t.startswith(EXCLUDE_FLAGS) and "=" in t:
+            out.append(_clean(t.split("=", 1)[1]))
+        elif t in EXCLUDE_FLAGS and i + 1 < len(toks):
+            out.append(_clean(toks[i + 1]))
+    return out
+
+
+def is_exclusion_token(toks, i):
+    """An `--exclude-dir=secrets` NAMES the secret in order to avoid it.
+
+    Without this the escape hatch is unusable: the flag that makes the command
+    safe was itself read as a reference to the secret path and denied, so the
+    only advice the guard could give was advice it then refused.
+    """
+    t = toks[i]
+    if t.startswith(EXCLUDE_FLAGS):
+        return True
+    return i > 0 and toks[i - 1] in EXCLUDE_FLAGS
+
+
+def _excluded(tree, excl, vcwd):
+    base = os.path.basename(tree)
+    for e in excl:
+        if not e:
+            continue
+        if e == base or resolve(e, vcwd) == tree or fnmatch.fnmatch(base, e):
+            return True
+    return False
+
+
+def reads_tree_from_above(verb, toks, vcwd):
+    """A recursive command rooted ABOVE a secret tree walks straight into it.
+
+    Nothing in `grep -r KEY .` or `tar -cf work/all.tar .` names the secret,
+    so every check in this file that looks at the paths in a command said yes.
+    The command still reads the credential, because the tree it was pointed at
+    contains the tree that was declared off limits. This is the round-six hole
+    with the shortest command and the widest reach.
+    """
+    if verb not in cfg.get("recursive_readers", []) or not cfg.get("_secret_abs"):
+        return None
+    flags = [t for t in toks[1:] if t.startswith("-")]
+    recursive = verb in ALWAYS_RECURSIVE or any(
+        f.startswith("--recursive") or (re.match(r"^-[A-Za-z]+$", f) and re.search(r"[rRa]", f))
+        for f in flags)
+    if not recursive:
+        return None
+    if verb in ("tar", "jar", "7z", "cpio") and any(re.match(r"^-?[a-zA-Z]*x", f) for f in flags):
+        # Extraction reads the archive, not the tree it unpacks into, so the
+        # directory after -C is a destination and not a tree being walked.
+        # What an archive would WRITE is judged by reading its entry names,
+        # which are plain text in both tar and zip headers.
+        return None
+    excl = _exclusion_values(toks)
+    operands = [t for i, t in enumerate(toks[1:], start=1)
+                if not t.startswith("-") and not is_exclusion_token(toks, i)]
+    if verb in COPY_LIKE and len(operands) > 1:
+        operands = operands[:-1]          # the destination is not a source
+    starts = [resolve(_clean(t), vcwd) for t in operands]
+    starts = [s for s in starts if s and os.path.isdir(s)]
+    if not starts and verb in ("rg", "ag", "ack"):
+        starts = [resolve(".", vcwd)]     # these search the working directory by default
+    for s in starts:
+        for sec in cfg["_secret_abs"]:
+            if sec != s and within(sec, s) and not _excluded(sec, excl, vcwd):
+                return sec
+    return None
+
+
+def _tree_has_match(tree, pats, cap=5000):
+    """Would this find(1) filter select anything inside the tree?"""
+    seen = 0
+    for root, dirs, files in os.walk(tree):
+        for name in list(dirs) + files:
+            seen += 1
+            if seen > cap:
+                return True               # too large to verify: refuse
+            full = os.path.join(root, name)
+            for flag, pat in pats:
+                target = name if flag in ("-name", "-iname") else full
+                try:
+                    if flag == "-regex":
+                        if re.search(pat, full):
+                            return True
+                    elif fnmatch.fnmatch(target.lower() if flag.startswith("-i") else target,
+                                         pat.lower() if flag.startswith("-i") else pat):
+                        return True
+                except re.error:
+                    return True
+    return False
+
+
+def find_walks_into(toks, vcwd):
+    """`find . -name '.env' -exec cat {} +` names nothing and reads everything.
+
+    find is the one verb that is given a place to START rather than a path to
+    act on, so the existing rule (does any token resolve into a guarded tree)
+    could never see it. Judged here by where it would walk to instead.
+    """
+    roots = []
+    for a in toks[1:]:
+        if a.startswith("-"):
+            break
+        roots.append(a)
+    if not roots:
+        roots = ["."]
+    pats = [(a, _clean(toks[i + 1])) for i, a in enumerate(toks)
+            if a in ("-name", "-iname", "-path", "-ipath", "-wholename", "-regex")
+            and i + 1 < len(toks)]
+    acting = any(f in toks for f in FIND_WRITE_FLAGS)
+    for r in roots:
+        start = resolve(_clean(r), vcwd)
+        if not start:
+            continue
+        for tree in cfg["_protected_abs"]:
+            if tree == start or not within(tree, start):
+                continue                  # only a STRICT ancestor walks into it
+            is_secret = any(within(tree, sec) for sec in cfg.get("_secret_abs", []))
+            hits = _tree_has_match(tree, pats) if pats else True
+            if not hits:
+                continue                  # the filter cannot select anything in there
+            if acting or is_secret:
+                return tree, acting, is_secret
+    return None
+
+
+def copy_lands_in_protected(verb, toks, vcwd):
+    """A source tree shaped like the repository needs no ../ to climb.
+
+    The zip-slip tests all used `../`, which the file scanner catches in the
+    archive header. This one does not: work/climb/protected/canary.txt copied
+    or unpacked AT THE ROOT lands on the protected file by plain arithmetic,
+    and every token in the command points somewhere harmless.
+    """
+    if verb not in COPY_LIKE:
+        return None
+    operands = [t for t in toks[1:] if not t.startswith("-")]
+    if len(operands) < 2:
+        return None
+    dest = resolve(_clean(operands[-1]), vcwd)
+    if not dest:
+        return None
+    for src in operands[:-1]:
+        s = resolve(_clean(src), vcwd)
+        if not s or not os.path.isdir(s):
+            continue
+        try:
+            names = sorted(os.listdir(s))[:500]
+        except OSError:
+            continue
+        landings = [os.path.join(dest, n) for n in names]
+        landings.append(os.path.join(dest, os.path.basename(s)))
+        for land in landings:
+            if in_any_protected(land, cfg):
+                return land
+    return None
+
+
+def alias_built_mid_command(verb, toks, more_follows):
+    """`ln -s $(printf 'pro%sed' tect) work/a; echo PWNED > work/a/canary.txt`
+
+    Every path check in this file resolves symlinks, which is why aliases that
+    already exist are caught. This one does not exist yet: it is created by
+    the first half of the command and used by the second, so at the moment the
+    guard is asked, the dangerous path resolves to nothing. On the NEXT tool
+    call the link is real and the same checks catch it, so the only case that
+    has to fail closed is a link whose target cannot be read now, inside a
+    command that carries on afterwards.
+    """
+    if verb != "ln" or not more_follows:
+        return False
+    operands = [t for t in toks[1:] if not t.startswith("-")]
+    if not operands:
+        return False
+    # `$` alone is enough: `ln -s $(printf '../pro%sed' tect) work/a` lexes the
+    # substitution into separate tokens, so the operand the guard sees is the
+    # single character `$`. Anything the shell will rewrite counts.
+    return bool(re.search(r"[$`*?\[]", operands[0]))
+
+
 try:
     tokens = lex(cmd)
 except ValueError as e:
@@ -379,9 +615,9 @@ segments = []
 vcwd = session_cwd
 # cwd is tracked across `cd` because `cd somewhere && rm ../x` changes what a
 # relative path means partway through the command.
-for toks in raw_segments:
-    if not toks:
-        continue
+live_segments = [t for t in raw_segments if t]
+last_idx = len(live_segments) - 1
+for idx, toks in enumerate(live_segments):
 
     # strip leading VAR=value assignments; their values still count as mentions
     path_dirs = []
@@ -414,6 +650,27 @@ for toks in raw_segments:
         continue
 
     segments.append((verb, toks, " ".join(toks)[:70]))
+
+    reached = reads_tree_from_above(verb, toks, vcwd)
+    if reached:
+        verdict("deny", f"'{verb}' would walk into {os.path.basename(reached)} from a directory "
+                        f"above it; secrets are denied to every verb, reads included. Narrow the "
+                        f"path, or pass --exclude-dir={os.path.basename(reached)}")
+    if verb == "find":
+        walk = find_walks_into(toks, vcwd)
+        if walk:
+            tree, acting, is_secret = walk
+            verdict("deny", f"find starts above {os.path.basename(tree)} and would "
+                            f"{'act on' if acting else 'select'} what is inside it; "
+                            f"{'secrets are denied to every verb' if is_secret else 'that tree is protected'}")
+    landed = copy_lands_in_protected(verb, toks, vcwd)
+    if landed:
+        verdict("deny", f"'{verb}' would put a file at {landed}, inside the protected tree, "
+                        f"without naming it: the source is shaped like the repository")
+    if alias_built_mid_command(verb, toks, idx < last_idx):
+        verdict("deny", "this command builds a link whose target cannot be resolved yet and then "
+                        "keeps going; a hard link would be a second name for a guarded file and a "
+                        "symlink a second path to it, and neither exists at the moment of the check")
     # toks[0] too: `rm${IFS}protected/x` is one token, and a line continuation
     # splits `rm \\<newline> protected/x` so that the path BECOMES the verb.
     # Scanning only the arguments missed both.
@@ -423,6 +680,8 @@ for toks in raw_segments:
                 verdict("deny", f"redirection into the protected tree: {toks[i + 1]}")
             continue
         if i == 0 and a == toks[0] and verb in READ_ONLY and not re.search(r"[${}]", a):
+            continue
+        if is_exclusion_token(toks, i):
             continue
         if cfg.get("_secret_abs") and secret_mentions(a, vcwd, deep):
             verdict("deny", f"'{verb}' would touch a secret path; secrets are denied to every verb, "
@@ -441,7 +700,10 @@ if not touches:
             # here blocked `make build` because a different target mentioned a
             # protected path, which is exactly the false positive to avoid.
             continue
-        for tok in toks:
+        # toks[0] is always read: `./work/z.sh` is the file being run. The rest
+        # only when the verb is one that runs, unpacks or applies its arguments.
+        scan = toks if runs_file_contents(verb, toks) else toks[:1]
+        for tok in scan:
             if script_mentions(tok, session_cwd):
                 verdict("deny", f"'{verb}' would execute {tok[:50]}, whose contents reference a "
                                 f"protected or secret path")

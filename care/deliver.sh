@@ -16,14 +16,16 @@ DATE=$(date +%Y-%m-%d)
 mkdir -p "$G/reports"
 OUT="$G/reports/delivery-$DATE.md"
 
-SMOKE=$("$G/tests/smoke.sh" 2>&1 || true)
+SMOKE=$(sh "$G/tests/smoke.sh" 2>&1 || true)
 SMOKE_LINE=$(printf '%s' "$SMOKE" | tail -1)
 RED=$("$PY" "$G/redteam/attack.py" 2>&1 || true)
 RED_LINE=$(printf '%s' "$RED" | grep -E "^attacks:" || echo "red team did not run")
+TOOLS=$("$PY" "$G/redteam/tools.py" 2>&1 || true)
+TOOLS_LINE=$(printf '%s' "$TOOLS" | grep -E "^[0-9]+ cases" || echo "tool-guard harness did not run")
 KIT_COMMIT=$(cd "$G" 2>/dev/null && git -C "$G" log -1 --format=%h 2>/dev/null || echo "not a git checkout")
 
 CLIENT="$CLIENT" DATE="$DATE" G="$G" REPO="$REPO" SMOKE_LINE="$SMOKE_LINE" RED_LINE="$RED_LINE" \
-KIT_COMMIT="$KIT_COMMIT" "$PY" - > "$OUT" <<'EOF'
+TOOLS_LINE="$TOOLS_LINE" KIT_COMMIT="$KIT_COMMIT" "$PY" - > "$OUT" <<'EOF'
 import json, os, subprocess
 
 g, repo = os.environ["G"], os.environ["REPO"]
@@ -72,14 +74,18 @@ p("\n## What was proven, on this machine, today\n")
 p("```")
 p(os.environ["SMOKE_LINE"].strip())
 p(os.environ["RED_LINE"].strip())
+p(os.environ["TOOLS_LINE"].strip())
 p("```")
 p("\nThe red team does not ask the guard for a verdict and believe it. For each attack it builds a throwaway "
   "sandbox with a canary file in a protected path and a fake credential in a secret path, asks the guard, "
   "**runs the command anyway**, and compares. `LEAK` means the guard allowed something that really did damage. "
   "`over-blocked` means it refused something harmless, which is counted too, because that is the number that "
-  "decides whether a team keeps the policy switched on.\n")
-p("Re-run both at any time:\n")
-p("```\nguardrails/tests/smoke.sh\npython3 guardrails/redteam/attack.py\n```")
+  "decides whether a team keeps the policy switched on. The second harness attacks the Write, Read and MCP "
+  "gates, and the gates themselves as programs: a gate that crashes or hangs exits with a code the hook layer "
+  "reads as broken, and a broken gate does not stop the tool call, so every malformed or pathological input "
+  "has to end in a refusal rather than an error.\n")
+p("Re-run all three at any time:\n")
+p("```\nguardrails/tests/smoke.sh\npython3 guardrails/redteam/attack.py\npython3 guardrails/redteam/tools.py\n```")
 
 p("\n## Keeping it true\n")
 p("- `guardrails/ci/github-guardrails.yml` (or the GitLab one) runs the smoke test on every push, so a policy "
@@ -98,8 +104,9 @@ p("- A compromised host. These are hooks, not a sandbox. Unattended runs belong 
   "network path to production.")
 p("- Anything server-side. A force push blocked on a laptop is still worth blocking on the server: branch "
   "protection and a pre-receive hook are the copy that survives a bypassed client.")
-p("- Attacks nobody has written yet. 206 are tested here; the number outstanding is not zero, which is why "
-  "the red team ships with the kit and why a working bypass is welcome as an issue.")
+p("- Attacks nobody has written yet. 253 executed attacks and 56 tool-guard cases are tested here, over six "
+  "rounds; the number outstanding is not zero, which is why both red teams ship with the kit and why a "
+  "working bypass is welcome as an issue.")
 EOF
 
 "$PY" - "$OUT" <<'EOF'

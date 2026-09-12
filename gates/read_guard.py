@@ -16,9 +16,11 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _lib import (abs_pattern, clean_uri, load_config,  # noqa: E402
-                  pattern_reaches, read_hook_input, resolve, verdict, within)
+from _lib import (abs_pattern, clean_uri, deadline, load_config,  # noqa: E402
+                  pattern_reaches, read_hook_input, resolve, shares_inode,
+                  verdict, within)
 
+deadline(8)
 cfg = load_config()
 data = read_hook_input()
 
@@ -56,6 +58,9 @@ for raw in paths:
     stem = raw.split("*")[0].split("?")[0]
     rp = resolve(stem, cwd)
     pat_abs = abs_pattern(raw, cwd)
+    if shares_inode(rp, SECRETS):
+        verdict("deny", f"{tool} was given a hard link to a secret file ({raw}); "
+                        f"the second name reads the same bytes")
     for s in SECRETS:
         if within(rp, s) or (within(s, rp) and stem.strip("./")):
             verdict("deny", f"{tool} would read inside a secret path ({raw}); "

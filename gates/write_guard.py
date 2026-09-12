@@ -24,9 +24,10 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _lib import (in_any_protected, load_config, read_hook_input,  # noqa: E402
-                  resolve, verdict, within)
+from _lib import (deadline, in_any_protected, load_config,  # noqa: E402
+                  read_hook_input, resolve, shares_inode, verdict, within)
 
+deadline(8)
 cfg = load_config()
 data = read_hook_input(argv_fallback=False)
 
@@ -60,6 +61,12 @@ for raw in paths:
     rp = resolve(raw, cwd)
     if in_any_protected(rp, cfg):
         verdict("deny", f"{rp} is inside the protected tree")
+    if shares_inode(rp, cfg["_protected_abs"]):
+        # A hard link is not a path into the tree, it is the same file under a
+        # second name, and realpath cannot see it. Without this, one `ln` puts
+        # a protected file inside the workspace and the Write tool edits it.
+        verdict("deny", f"{rp} is a second name for a file inside the protected tree "
+                        f"(a hard link), so writing it writes that file")
     if not within(rp, cfg["_allowed_tree_abs"]):
         verdict("deny", f"{rp} is outside the allowed tree "
                         f"{cfg['_allowed_tree_abs']}")

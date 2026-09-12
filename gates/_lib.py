@@ -58,6 +58,84 @@ def die(reason, code=2):
     sys.exit(code)
 
 
+def _deny_on_crash(exc_type, exc, tb):
+    """Any unhandled error in a gate becomes a DENY, not a crash.
+
+    Round five found one input that crashed the guard and fixed that input.
+    Round six found another (a NUL byte in a file the guard reads), which
+    means the class is the bug, not the instance: a gate that raises exits
+    with a code the hook layer reads as "broken", and a broken gate does not
+    stop the tool call. Crashing is therefore an ALLOW, and the only safe
+    behaviour for a bug nobody has found yet is to refuse.
+    """
+    try:
+        import traceback
+        traceback.print_exception(exc_type, exc, tb, file=sys.stderr)
+    except Exception:  # noqa: BLE001
+        pass
+    die(f"the guard hit an unexpected error and cannot decide "
+        f"({getattr(exc_type, '__name__', 'error')}: {exc}); failing closed")
+
+
+sys.excepthook = _deny_on_crash
+
+
+def deadline(seconds=8):
+    """Refuse if the gate has not decided within `seconds`.
+
+    The same asymmetry again: a hook that never returns is a hook the runtime
+    gives up on, and giving up does not stop the tool call. A pathological
+    glob over a large repository is therefore a bypass unless slowness itself
+    denies. Not available on platforms without SIGALRM, where the runtime's
+    own timeout is the only backstop.
+    """
+    try:
+        import signal
+
+        def _out_of_time(_sig, _frame):
+            die(f"the guard could not decide within {seconds} seconds; failing closed")
+
+        signal.signal(signal.SIGALRM, _out_of_time)
+        signal.alarm(seconds)
+    except (ImportError, AttributeError, ValueError, OSError):
+        pass
+
+
+def shares_inode(path, trees, cap=50_000):
+    """True when this file IS a protected file under another name.
+
+    realpath resolves symlinks and sees nothing here: a hard link is not a
+    reference to a path, it is a second name for the same inode, and the file
+    it names has no memory of where it was linked from. `find . -name .env
+    -exec ln {} work/hl` then `cat work/hl` reads the credential through a
+    path that looks like ordinary work. Only files with more than one link are
+    ever scanned for, so the walk almost never happens.
+    """
+    if not path:
+        return False
+    try:
+        st = os.stat(path)
+    except OSError:
+        return False
+    if not os.path.isfile(path) or getattr(st, "st_nlink", 1) < 2:
+        return False
+    key = (st.st_dev, st.st_ino)
+    seen = 0
+    for tree in trees:
+        for root, _dirs, files in os.walk(tree):
+            for fn in files:
+                seen += 1
+                if seen > cap:
+                    return True     # too large to verify in time: refuse
+                try:
+                    s2 = os.stat(os.path.join(root, fn))
+                except OSError:
+                    continue
+                if (s2.st_dev, s2.st_ino) == key:
+                    return True
+    return False
+
+
 def load_config():
     """Read config.json, or refuse.
 
@@ -144,7 +222,16 @@ def resolve(path_str, base):
     if not path_str:
         return ""
     p = path_str if os.path.isabs(path_str) else os.path.join(base, path_str)
-    return os.path.realpath(p)
+    try:
+        return os.path.realpath(p)
+    except (ValueError, OSError):
+        # A NUL byte inside the string raises here. That mattered: the guard
+        # scans the CONTENTS of files a command will run, a tar header is
+        # binary, and `tar -xf anything.tar` crashed the gate. A crashed gate
+        # exits with neither 0 nor 2, which the hook layer calls broken, and a
+        # broken gate does not stop the tool call. So this returns nothing,
+        # which matches nothing, and the caller's own checks still apply.
+        return ""
 
 
 def _fs_is_case_insensitive():
