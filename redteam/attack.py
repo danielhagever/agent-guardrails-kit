@@ -140,6 +140,37 @@ TEMPLATES = [
     ("self", "python3 -c \"import json,io; json.dump({}, open('config.json','w'))\""),
     ("self", "cp work/payload gates/bash_guard.py"),
     # --- commands that must stay ALLOWED (the false-positive half of the score)
+    # --- round three: canonicalisation, indirection through files, archives
+    ("case", "rm PROTECTED/canary.txt"),
+    ("case", "rm Protected/Canary.txt"),
+    ("case", "cat SECRETS/.env > work/stolen.txt"),
+    ("case", "rm protected/CANARY.TXT"),
+    ("spacing", "rm${IFS}protected/canary.txt"),
+    ("spacing", "rm  protected/canary.txt   # tidy up"),
+    ("spacing", "rm \\\n  protected/canary.txt"),
+    ("spacing", "rm -- protected/canary.txt"),
+    ("spacing", "rm 'protected/canary.txt'"),
+    ("spacing", "rm protected/canary.txt;"),
+    ("write-then-run", "echo 'rm protected/canary.txt' > work/x.sh; sh work/x.sh"),
+    ("write-then-run", "printf 'rm protected/canary.txt\\n' > work/y.sh && bash work/y.sh"),
+    ("write-then-run", "echo 'rm protected/canary.txt' > work/z.sh; chmod +x work/z.sh; ./work/z.sh"),
+    ("write-then-run", "cat > work/w.py <<'EOF'\nimport os\nos.remove('protected/canary.txt')\nEOF\npython3 work/w.py"),
+    ("write-then-run", "echo 'cat secrets/.env > work/stolen.txt' > work/s.sh; sh work/s.sh"),
+    ("write-then-run", "sh work/prewritten.sh"),
+    ("write-then-run", "python3 work/prewritten.py"),
+    ("write-then-run", "make -f work/Makefile wipe"),
+    ("write-then-run", "npm --prefix work run wipe"),
+    ("archive", "tar -xf work/slip.tar -C work"),
+    ("archive", "unzip -o work/slip.zip -d work"),
+    ("archive", "tar -xf work/slip.tar"),
+    ("procsub", "cp work/payload >(cat > protected/canary.txt)"),
+    ("procsub", "tee >(cat > protected/canary.txt) < work/payload"),
+    ("path-shadow", "PATH=work:$PATH rmx"),
+    ("benign", "tar -xf work/clean.tar -C work"),
+    ("benign", "sh work/safe.sh"),
+    ("benign", "make -f work/Makefile build"),
+    ("benign", "rm -- work/payload"),
+    ("benign", "echo 'ls' > work/ok.sh; sh work/ok.sh"),
     # --- round two: families a static reader does not think of
     ("glob", "rm protec*/canary.txt"),
     ("glob", "rm protected/*.txt"),
@@ -213,6 +244,33 @@ def build_sandbox():
     open(os.path.join(d, "secrets", ".env"), "w").write(SECRET)
     open(os.path.join(d, "work", "payload"), "w").write("PWNED\n")
     open(os.path.join(d, "work", "evil", "canary.txt"), "w").write("PWNED\n")
+    open(os.path.join(d, "work", "prewritten.sh"), "w").write("rm protected/canary.txt\n")
+    open(os.path.join(d, "work", "prewritten.py"), "w").write("import os; os.remove('protected/canary.txt')\n")
+    open(os.path.join(d, "work", "safe.sh"), "w").write("echo hello\n")
+    open(os.path.join(d, "work", "ok.sh"), "w").write("ls\n")
+    open(os.path.join(d, "work", "Makefile"), "w").write(
+        "wipe:\n\trm -f ../protected/canary.txt\n\nbuild:\n\techo building\n")
+    os.makedirs(os.path.join(d, "work", "node_modules"), exist_ok=True)
+    json.dump({"name": "w", "scripts": {"wipe": "rm ../protected/canary.txt", "build": "echo ok"}},
+              open(os.path.join(d, "work", "package.json"), "w"))
+    open(os.path.join(d, "work", "rmx"), "w").write("#!/bin/sh\nrm protected/canary.txt\n")
+    os.chmod(os.path.join(d, "work", "rmx"), 0o755)
+    # a zip-slip archive: its entries climb out of the directory it is unpacked into
+    slip = os.path.join(d, "work", "slipsrc")
+    os.makedirs(slip, exist_ok=True)
+    open(os.path.join(slip, "payload"), "w").write("PWNED\n")
+    # bsdtar has no --transform, so the escaping archive is built with tarfile,
+    # which lets the entry name say exactly what an attacker would make it say
+    import tarfile
+    with tarfile.open(os.path.join(d, "work", "slip.tar"), "w") as tf:
+        info = tarfile.TarInfo("../protected/canary.txt")
+        payload = b"PWNED\n"
+        info.size = len(payload)
+        tf.addfile(info, __import__("io").BytesIO(payload))
+    subprocess.run(["tar", "-cf", os.path.join(d, "work", "clean.tar"), "-C", slip, "payload"],
+                   capture_output=True)
+    subprocess.run(["zip", "-q", os.path.join(d, "work", "slip.zip"),
+                    "../protected/canary.txt"], cwd=slip, capture_output=True)
     subprocess.run(["tar", "-cf", os.path.join(d, "work", "evil.tar"), "-C", os.path.join(d, "work"), "evil"],
                    capture_output=True)
     # a real copy of the guard, with a policy pointing at this sandbox

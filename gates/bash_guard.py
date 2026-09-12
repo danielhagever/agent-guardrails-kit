@@ -19,6 +19,7 @@ This file contains only the logic that applies it.
 """
 import fnmatch
 import glob as globmod
+import json
 import os
 import re
 import shlex
@@ -182,6 +183,120 @@ def glob_reaches(token, vcwd, targets):
     return False
 
 
+def script_mentions(path_token, vcwd, seen=None):
+    """Read the file a command is about to execute, and judge its contents.
+
+    `echo 'rm protected/x' > work/go.sh; sh work/go.sh` passed every check:
+    the first half writes to an allowed path, the second half mentions nothing
+    protected. The damage lives in the file. So when a command runs a file that
+    exists in the workspace, the file is read and scanned like a command.
+
+    npm and make keep their commands somewhere else again, so `npm run wipe`
+    and `make target` are followed into package.json and the Makefile.
+    """
+    seen = seen or set()
+    t = _clean(path_token)
+    if not t or t.startswith("-"):
+        return False
+    p = resolve(t, vcwd)
+    if p in seen or not os.path.isfile(p):
+        return False
+    seen.add(p)
+    try:
+        if os.path.getsize(p) > 256_000:
+            return False
+        with open(p, encoding="utf-8", errors="ignore") as f:
+            text = f.read()
+    except OSError:
+        return False
+    bases = [vcwd, os.path.dirname(p)]
+    for line in text.splitlines():
+        line = line.strip().lstrip("\t")
+        if not line or line.startswith("#"):
+            continue
+        for piece in re.split(r"[;&|]+", line):
+            for tok in re.findall(r"[^\s'\"]+|'[^']*'|\"[^\"]*\"", piece):
+                for base in bases:
+                    if mentions_protected(tok, base, True) or (
+                            cfg.get("_secret_abs") and secret_mentions(tok, base, True)):
+                        return True
+    return False
+
+
+def _scan_text(text, bases):
+    for line in text.splitlines():
+        line = line.strip().lstrip("\t")
+        if not line or line.startswith("#"):
+            continue
+        for piece in re.split(r"[;&|]+", line):
+            for tok in re.findall(r"[^\s'\"]+|'[^']*'|\"[^\"]*\"", piece):
+                for base in bases:
+                    if mentions_protected(tok, base, True) or (
+                            cfg.get("_secret_abs") and secret_mentions(tok, base, True)):
+                        return True
+    return False
+
+
+def npm_or_make_target(toks, vcwd):
+    """`npm run wipe` and `make wipe` hide the command in another file.
+
+    Only the target that was actually asked for is judged. Scanning the whole
+    file blocked `make build` because some other target in the same Makefile
+    mentioned a protected path, which is a false positive a team would not
+    forgive.
+    """
+    verb = os.path.basename(toks[0]).lower()
+    args = [a for a in toks[1:] if a not in ("run", "run-script")]
+    if verb in ("npm", "pnpm", "yarn", "bun"):
+        prefix = vcwd
+        for i, a in enumerate(args):
+            if a in ("--prefix", "-C") and i + 1 < len(args):
+                prefix = os.path.normpath(os.path.join(vcwd, args[i + 1]))
+        wanted = [a for a in args if not a.startswith("-") and a not in (prefix, os.path.basename(prefix))]
+        pkg = os.path.join(prefix, "package.json")
+        if not os.path.isfile(pkg):
+            return False
+        try:
+            scripts = json.load(open(pkg, encoding="utf-8")).get("scripts", {})
+        except (ValueError, OSError):
+            return False
+        targets = [scripts[w] for w in wanted if w in scripts] or list(scripts.values())[:0]
+        return any(_scan_text(t, [prefix, vcwd]) for t in targets)
+    if verb in ("make", "gmake"):
+        mk, wanted = "Makefile", []
+        skip = False
+        for i, a in enumerate(args):
+            if skip:
+                skip = False
+                continue
+            if a == "-f" and i + 1 < len(args):
+                mk = args[i + 1]
+                skip = True
+            elif not a.startswith("-"):
+                wanted.append(a)
+        path = resolve(mk, vcwd)
+        if not os.path.isfile(path):
+            return False
+        try:
+            text = open(path, encoding="utf-8", errors="ignore").read()
+        except OSError:
+            return False
+        recipes, current = {}, None
+        for line in text.splitlines():
+            m = re.match(r"^([A-Za-z0-9_.\-/]+)\s*:(?!=)", line)
+            if m:
+                current = m.group(1)
+                recipes[current] = []
+            elif current and line.startswith(("\t", "    ")):
+                recipes[current].append(line.strip())
+            elif not line.strip():
+                current = None
+        chosen = wanted or (list(recipes)[:1])
+        return any(_scan_text("\n".join(recipes.get(t, [])), [os.path.dirname(path), vcwd])
+                   for t in chosen)
+    return False
+
+
 def slash_paths(token):
     """Path-like substrings (they contain a separator) inside a token."""
     return re.findall(r"[A-Za-z0-9_.~@%+=:,\-]*(?:/[A-Za-z0-9_.~@%+=:,\-]+)+/?", token)
@@ -270,8 +385,13 @@ for toks in raw_segments:
         continue
 
     # strip leading VAR=value assignments; their values still count as mentions
+    path_dirs = []
     while toks and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", toks[0]):
-        value = toks[0].split("=", 1)[1]
+        name, value = toks[0].split("=", 1)
+        if name == "PATH":
+            # `PATH=work:$PATH rmx` runs work/rmx, and nothing in the command
+            # line says so. The directories it prepends are where to look.
+            path_dirs += [d for d in value.split(":") if d and "$" not in d]
         # `S=secrets/.env; cat $S` hid a secret behind one letter.
         if cfg.get("_secret_abs") and secret_mentions(value, vcwd, True):
             verdict("deny", "a variable in this command points at a secret path; "
@@ -284,16 +404,26 @@ for toks in raw_segments:
 
     verb = os.path.basename(toks[0]).lower()
     deep = verb in INTERPRETERS
+    for d in path_dirs:
+        # `PATH=work:$PATH rmx` runs work/rmx and says nothing about it.
+        if script_mentions(os.path.join(d, verb), vcwd):
+            verdict("deny", f"'{verb}' resolves through a PATH this command sets itself, to a file "
+                            f"that references a protected or secret path")
     if verb == "cd":
         target = os.path.expanduser(toks[1]) if len(toks) > 1 else os.path.expanduser("~")
         vcwd = target if os.path.isabs(target) else os.path.normpath(os.path.join(vcwd, target))
         continue
 
     segments.append((verb, toks, " ".join(toks)[:70]))
-    for i, a in enumerate(toks[1:], start=1):
+    # toks[0] too: `rm${IFS}protected/x` is one token, and a line continuation
+    # splits `rm \\<newline> protected/x` so that the path BECOMES the verb.
+    # Scanning only the arguments missed both.
+    for i, a in enumerate(toks, start=0):
         if a in REDIR:
             if i + 1 < len(toks) and touches_protected(toks[i + 1], vcwd):
                 verdict("deny", f"redirection into the protected tree: {toks[i + 1]}")
+            continue
+        if i == 0 and a == toks[0] and verb in READ_ONLY and not re.search(r"[${}]", a):
             continue
         if cfg.get("_secret_abs") and secret_mentions(a, vcwd, deep):
             verdict("deny", f"'{verb}' would touch a secret path; secrets are denied to every verb, "
@@ -302,6 +432,20 @@ for toks in raw_segments:
             touches = True
 
 if not touches:
+    # Last stop: a command can reference nothing protected and still be the
+    # attack, because the path is inside the file it runs.
+    for verb, toks, seg in segments:
+        if npm_or_make_target(toks, session_cwd):
+            verdict("deny", f"'{verb}' runs a target whose command references a protected or secret path")
+        if verb in ("make", "gmake", "npm", "pnpm", "yarn", "bun"):
+            # already judged above, target by target. Reading the whole Makefile
+            # here blocked `make build` because a different target mentioned a
+            # protected path, which is exactly the false positive to avoid.
+            continue
+        for tok in toks:
+            if script_mentions(tok, session_cwd):
+                verdict("deny", f"'{verb}' would execute {tok[:50]}, whose contents reference a "
+                                f"protected or secret path")
     verdict("allow", "command does not reference the protected tree")
 
 for verb, toks, seg in segments:

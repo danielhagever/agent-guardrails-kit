@@ -114,6 +114,22 @@ for c in "git commit -m \"don't break protected stuff later\"" \
   check "still allowed: $LABEL" 0 $RC
 done
 
+# --- round three: case, the verb token itself, and scripts (2026-09-12) ---
+for c in "rm PROTECTED/important.txt" "rm Protected/Important.txt" "rm\${IFS}protected/important.txt"; do
+  LABEL=$(printf '%s' "$c" | cut -c1-38)
+  printf '%s' "$(j Bash "{\"command\":$(printf '%s' "$c" | python3 -c 'import json,sys;print(json.dumps(sys.stdin.read()))')}")" | hooks/pre_bash_guard.sh 2>/dev/null >/dev/null
+  RC=$?
+  check "canonicalisation blocked: $LABEL" 2 $RC
+done
+mkdir -p scratch
+printf 'rm protected/important.txt\n' > scratch/attack.sh
+printf 'echo hello\n' > scratch/safe.sh
+printf '%s' "$(j Bash '{"command":"sh scratch/attack.sh"}')" | hooks/pre_bash_guard.sh 2>/dev/null >/dev/null
+check "running a script whose CONTENTS attack is blocked" 2 $?
+printf '%s' "$(j Bash '{"command":"sh scratch/safe.sh"}')" | hooks/pre_bash_guard.sh 2>/dev/null >/dev/null
+check "running a harmless script is allowed" 0 $?
+rm -f scratch/attack.sh scratch/safe.sh
+
 # --- glob patterns: the wildcard families the red team found (2026-09-12) ---
 for c in "rm protec*/important.txt" "rm protected/*.txt" "rm p*/i*.txt" "rm [p]rotected/important.txt" "rm protecte?/important.txt" "rm protec{t,x}ed/important.txt"; do
   LABEL=$(printf '%s' "$c" | cut -c1-40)
@@ -465,7 +481,7 @@ fi
 # what happened on disk. Skipped in nested runs (the interrupt test re-enters).
 if [ -z "$HOOKS_LAB_NESTED" ] && [ -z "$SKIP_REDTEAM" ]; then
   echo ""
-  echo "  red team (148 attacks, each executed against a canary):"
+  echo "  red team (178 attacks, each executed against a canary):"
   if python3 "$LAB/redteam/attack.py" > "$LAB/scratch/redteam.out" 2>&1; then
     PASS=$((PASS+1)); echo "  ok   no attack reached the canary or the secret"
   else

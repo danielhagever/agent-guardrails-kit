@@ -138,11 +138,33 @@ def resolve(path_str, base):
     return os.path.realpath(p)
 
 
+def _fs_is_case_insensitive():
+    """macOS and Windows open PROTECTED/x when you asked for protected/x.
+
+    The guard compared paths byte for byte, so `rm PROTECTED/canary.txt` ran.
+    Measured once against the real filesystem rather than assumed from the
+    platform name, because a case-sensitive volume on a Mac is a normal thing.
+    """
+    probe = os.path.join(LAB, "config.json")
+    try:
+        return os.path.exists(probe) and os.path.exists(probe.upper())
+    except OSError:
+        return False
+
+
+CASE_INSENSITIVE = _fs_is_case_insensitive()
+
+
+def _cmp(path):
+    return path.lower() if CASE_INSENSITIVE else path
+
+
 def within(resolved_path, tree):
     """True when resolved_path is tree itself or sits underneath it."""
     if not resolved_path or not tree:
         return False
-    return resolved_path == tree or resolved_path.startswith(tree + os.sep)
+    a, b = _cmp(resolved_path), _cmp(tree)
+    return a == b or a.startswith(b + os.sep)
 
 
 def in_any_protected(resolved_path, cfg):
