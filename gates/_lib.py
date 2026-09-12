@@ -385,8 +385,11 @@ def abs_pattern(raw, cwd):
 def pattern_reaches(pattern_abs, target_abs):
     """True when a glob pattern could match this path, or anything under it."""
     import fnmatch
-    pc = pattern_abs.split(os.sep)
-    tc = target_abs.split(os.sep)
+    # A trailing slash leaves an empty component behind, and `rm -rf ./inf*/`
+    # then compared "" against "prod" and decided the pattern could not reach
+    # the tree it plainly matches.
+    pc = [c for c in pattern_abs.split(os.sep) if c]
+    tc = [c for c in target_abs.split(os.sep) if c]
     for i in range(min(len(pc), len(tc))):
         if pc[i] == "**":
             return True

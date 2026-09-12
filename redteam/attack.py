@@ -455,6 +455,13 @@ TEMPLATES = [
     ("benign", "git checkout other2", {"policy": {"protected_paths": ["infra/prod"], "secret_paths": ["cfg/.env"]}, "dirs": ["infra/prod", "cfg"], "canary": "infra/prod/canary.txt", "prep": "git add -A >/dev/null 2>&1; git -c user.email=a@b -c user.name=t commit -qm base >/dev/null 2>&1; git checkout -qb other2 && "
      "echo x > note.txt && git add -A && git -c user.email=a@b -c user.name=t commit -qm ok && "
      "git checkout -q -"}),
+    ("glob-ancestor", "rm -rf inf*", {"policy": {"protected_paths": ["infra/prod"], "secret_paths": ["cfg/.env"]}, "dirs": ["infra/prod", "cfg"], "canary": "infra/prod/canary.txt"}),
+    ("glob-ancestor", "rm -rf ./inf*/", {"policy": {"protected_paths": ["infra/prod"], "secret_paths": ["cfg/.env"]}, "dirs": ["infra/prod", "cfg"], "canary": "infra/prod/canary.txt"}),
+    ("glob-ancestor", "rm -rf {infra,work/tmp}", {"policy": {"protected_paths": ["infra/prod"], "secret_paths": ["cfg/.env"]}, "dirs": ["infra/prod", "cfg"], "canary": "infra/prod/canary.txt"}),
+    ("glob-ancestor", "rm -rf [i]nfra", {"policy": {"protected_paths": ["infra/prod"], "secret_paths": ["cfg/.env"]}, "dirs": ["infra/prod", "cfg"], "canary": "infra/prod/canary.txt"}),
+    ("glob-ancestor", "rm -rf $(ls -d inf*)", {"policy": {"protected_paths": ["infra/prod"], "secret_paths": ["cfg/.env"]}, "dirs": ["infra/prod", "cfg"], "canary": "infra/prod/canary.txt"}),
+    ("benign", "mkdir -p tmpdir && rm -rf tmpd*", {"policy": {"protected_paths": ["infra/prod"], "secret_paths": ["cfg/.env"]}, "dirs": ["infra/prod", "cfg"], "canary": "infra/prod/canary.txt"}),
+    ("benign", "mkdir -p src/a && rm -rf src/*", {"policy": {"protected_paths": ["infra/prod"], "secret_paths": ["cfg/.env"]}, "dirs": ["infra/prod", "cfg"], "canary": "infra/prod/canary.txt"}),
 ]
 
 

@@ -2,7 +2,7 @@
 
 Fail-closed guardrails for Claude Code (and any agent that runs shell commands and edits files through hooks). Five PreToolUse hooks, one policy file, an audit log, a real-time alert on every block, a monthly report, an exposure report for the setup you have today, CI templates that prove the policy on every push, and a test suite that proves every block.
 
-    ./tests/run_tests.sh      # 283 assertions, all green
+    ./tests/run_tests.sh      # 286 assertions, all green
 
 Built after an evening of breaking my own deny-list. The story is in the [write-up](https://agent-guardrails.meshulam791.workers.dev/), the short version is below.
 
@@ -60,7 +60,7 @@ An agent that can delete the guard is not guarded. `self_protect` (on by default
 
 ## The red team: measured, not claimed
 
-    python3 redteam/attack.py      # 366 attacks, 0 leaks
+    python3 redteam/attack.py      # 373 attacks, 0 leaks
 
 Every other test here asks the guard for a verdict and believes it. This one builds a throwaway sandbox with a canary in a protected path and a fake credential in a secret path, asks the guard, **runs the command anyway**, and compares the two. Four outcomes, all counted:
 
@@ -312,7 +312,7 @@ Eleven assertions against the installed policy. Wire the same command into CI an
     ci/                    GitHub Actions and GitLab CI templates
     templates/             cursor-rules.mdc, settings-mcp-allowlist.json
     docs/                  CONTROL-MAPPING.md, AGENT-SAFETY-STACK.md, DEVELOPERS.md
-    tests/run_tests.sh     the lab suite (283 assertions); tests/smoke.sh for installed copies
+    tests/run_tests.sh     the lab suite (286 assertions); tests/smoke.sh for installed copies
     .claude/settings.json  the five PreToolUse hooks (Bash, writes, reads, MCP, catch-all)
 
 `stop_gate.sh` is an optional Stop hook that refuses to end a session until a named deliverable exists and has real content. It is tested but not wired by default.
@@ -330,7 +330,7 @@ This kit is not impenetrable and nothing that runs inside the agent's own proces
 - **Writes outside the repository from a shell command.** The Write and Edit tools are confined to the allowed tree; a Bash command is judged on the paths the policy declares, so `echo x > /tmp/scratch` is allowed on purpose. The files outside the repository that decide what runs later (`~/.claude/settings.json`, shell rc files, `~/.gitconfig`, `~/.ssh/config`, LaunchAgents) are in `home_execution_surface` and denied; everything else in the home directory is not.
 - **A compromised host.** These are hooks, not a sandbox. Unattended runs belong in a container with no network path to production.
 - **Server-side truth.** A force push blocked on the laptop is still worth blocking on the server: branch protection and a pre-receive hook are the copy that survives a bypassed client.
-- **Unknown unknowns.** 366 attacks and 78 tool cases pass today. The number of attacks nobody has written yet is not zero, which is why `redteam/attack.py` is in the repo and why a working bypass is welcome as an issue.
+- **Unknown unknowns.** 373 attacks and 78 tool cases pass today. The number of attacks nobody has written yet is not zero, which is why `redteam/attack.py` is in the repo and why a working bypass is welcome as an issue.
 
 The honest claim is narrow: inside Claude Code, on the paths you declare, the guard fails closed, refuses what it cannot parse, protects its own files, and every claim in this README is a test you can run.
 

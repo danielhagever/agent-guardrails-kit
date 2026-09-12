@@ -750,6 +750,12 @@ printf '%s' "$(r11 'aws s3 cp infra/README.md s3://bucket/x')" | "$CB/hooks/pre_
 check "uploading one ordinary file allowed" 0 $?
 printf '%s' "$(r11 'docker build -t app .')" | "$CB/hooks/pre_bash_guard.sh" 2>/dev/null >/dev/null
 check "a build context holding the secret blocked" 2 $?
+printf '%s' "$(r11 'rm -rf inf*')" | "$CB/hooks/pre_bash_guard.sh" 2>/dev/null >/dev/null
+check "a glob that expands to the guarded parent blocked" 2 $?
+printf '%s' "$(r11 'rm -rf ./inf*/')" | "$CB/hooks/pre_bash_guard.sh" 2>/dev/null >/dev/null
+check "the same with a trailing slash blocked" 2 $?
+printf '%s' "$(r11 'rm -rf src/*')" | "$CB/hooks/pre_bash_guard.sh" 2>/dev/null >/dev/null
+check "a glob inside an ordinary directory allowed" 0 $?
 printf 'cfg/\n' > "$CB/.dockerignore"
 printf '%s' "$(r11 'docker build -t app .')" | "$CB/hooks/pre_bash_guard.sh" 2>/dev/null >/dev/null
 check "the same build with a .dockerignore allowed" 0 $?
@@ -847,7 +853,7 @@ if [ -z "$HOOKS_LAB_NESTED" ] && [ -z "$SKIP_REDTEAM" ]; then
     grep "FAIL" "$LAB/scratch/tools.out" | head -5
   fi
   echo ""
-  echo "  red team (358 attacks, each executed against a canary):"
+  echo "  red team (373 attacks, each executed against a canary):"
   if python3 "$LAB/redteam/attack.py" > "$LAB/scratch/redteam.out" 2>&1; then
     PASS=$((PASS+1)); echo "  ok   no attack reached the canary or the secret"
   else
