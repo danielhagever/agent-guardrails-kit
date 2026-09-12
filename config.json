@@ -127,6 +127,14 @@
     {
       "pattern": "\\bgit\\s+config\\b[^|;]*\\b(core\\.hookspath|alias\\.|core\\.editor|core\\.pager|sequence\\.editor|core\\.sshcommand|filter\\.[^ ]*\\.(clean|smudge)|diff\\.[^ ]*\\.command)",
       "reason": "this git config key decides what git EXECUTES, so setting it is a way to run code later"
+    },
+    {
+      "pattern": "\\bgit\\b[^|;]*\\s-c\\s+[^\\s]*(core\\.hookspath|alias\\.|core\\.editor|core\\.pager|sequence\\.editor|core\\.sshcommand|filter\\.[^ ]*\\.(clean|smudge)|diff\\.[^ ]*\\.command|diff\\.external)",
+      "reason": "git -c sets the same keys as git config, for one command, and those keys decide what git EXECUTES"
+    },
+    {
+      "pattern": "\\bGIT_CONFIG_(KEY_[0-9]+|PARAMETERS)\\s*=\\s*[^\\s]*(core\\.hookspath|alias\\.|core\\.editor|core\\.pager|sequence\\.editor|core\\.sshcommand|filter\\.|diff\\.)",
+      "reason": "the GIT_CONFIG_* variables are git config by another name, and this key decides what git executes"
     }
   ],
   "audit_log": ".claude/guardrails-audit.jsonl",
@@ -251,5 +259,40 @@
     "7z",
     "jar"
   ],
-  "_recursive_readers_comment": "Verbs that walk a whole tree. Pointed at a directory ABOVE a secret path they read it without ever naming it: `grep -r KEY .` and `tar -cf out.tar .` were both allowed until round six. An --exclude-dir / --exclude naming the secret re-allows them."
+  "_recursive_readers_comment": "Verbs that walk a whole tree. Pointed at a directory ABOVE a secret path they read it without ever naming it: `grep -r KEY .` and `tar -cf out.tar .` were both allowed until round six. An --exclude-dir / --exclude naming the secret re-allows them.",
+  "exec_env_vars": [
+    "BASH_ENV",
+    "ENV",
+    "SHELLOPTS",
+    "PYTHONPATH",
+    "PYTHONSTARTUP",
+    "PYTHONHOME",
+    "NODE_OPTIONS",
+    "NODE_PATH",
+    "PERL5OPT",
+    "PERL5LIB",
+    "RUBYOPT",
+    "RUBYLIB",
+    "LD_LIBRARY_PATH",
+    "DYLD_LIBRARY_PATH",
+    "GIT_SSH_COMMAND",
+    "GIT_SSH",
+    "GIT_EXTERNAL_DIFF",
+    "GIT_EDITOR",
+    "GIT_PAGER",
+    "GIT_SEQUENCE_EDITOR",
+    "GIT_TEMPLATE_DIR",
+    "EDITOR",
+    "VISUAL",
+    "PAGER",
+    "MANPAGER",
+    "BROWSER",
+    "JAVA_TOOL_OPTIONS",
+    "_JAVA_OPTIONS",
+    "MAVEN_OPTS",
+    "GRADLE_OPTS",
+    "PS4",
+    "PROMPT_COMMAND"
+  ],
+  "_exec_env_comment": "Variables that decide what a command RUNS. Set in front of an ordinary command they are invisible: `PYTHONPATH=work python3 -c 'print(1)'` runs work/sitecustomize.py before the print. Their values are read as payloads: the file they name is scanned, and a directory is checked for the files an interpreter loads by itself. LD_PRELOAD and DYLD_INSERT_LIBRARIES are denied outright; an agent has no reason to set them inline."
 }

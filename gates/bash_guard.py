@@ -65,6 +65,7 @@ for rule in cfg.get("deny_patterns", []):
 READ_ONLY = set(cfg["read_only_verbs"])
 INTERPRETERS = set(cfg.get("interpreter_verbs", []))
 FIND_WRITE_FLAGS = set(cfg["find_write_flags"])
+EXEC_ENV = {v.upper() for v in cfg.get("exec_env_vars", [])}
 
 
 def _clean(token):
@@ -314,6 +315,105 @@ def npm_or_make_target(toks, vcwd):
         return any(_scan_text("\n".join(recipes.get(t, [])), [os.path.dirname(path), vcwd])
                    for t in chosen)
     return False
+
+
+
+NEVER_INLINE = {"LD_PRELOAD", "LD_AUDIT", "DYLD_INSERT_LIBRARIES", "DYLD_FORCE_FLAT_NAMESPACE"}
+GIT_EXEC_KEYS = re.compile(
+    r"(core\.hookspath|core\.editor|core\.pager|core\.sshcommand|sequence\.editor|alias\."
+    r"|filter\.[^ ]*\.(clean|smudge)|diff\.[^ ]*\.command|diff\.external|pager\.)", re.I)
+PYTHON_AUTOLOAD = ("sitecustomize.py", "usercustomize.py")
+
+
+def env_assignment_risk(name, value, vcwd):
+    """A variable set in front of a command can decide what that command RUNS.
+
+    `PYTHONPATH=work python3 -c "print(1)"` looks like nothing: no protected
+    path, no interpreter payload, a two-word program. Python imports
+    `sitecustomize` from the search path at startup, so the file in `work/`
+    ran before the print did. `BASH_ENV=work/x.sh bash script.sh` and
+    `NODE_OPTIONS='--require ./work/x.js' node -e 1` are the same move, and so
+    is `GIT_CONFIG_KEY_0=core.hooksPath`. The command line says nothing about
+    any of it, which is exactly why it has to be read as a payload.
+    """
+    up = name.upper()
+    if up in NEVER_INLINE:
+        return f"{name} injects code into every process this command starts"
+    if up.startswith("GIT_CONFIG_KEY") and GIT_EXEC_KEYS.search(value or ""):
+        return f"{name}={value[:40]} sets a git key that decides what git EXECUTES"
+    if up not in EXEC_ENV:
+        return None
+    for part in re.split(r"[:\s'\"=,]+", value or ""):
+        part = _clean(part)
+        if not part or part.startswith("-"):
+            continue
+        if script_mentions(part, vcwd):
+            return (f"{name} points at {part[:40]}, whose contents reference a protected "
+                    f"or secret path")
+        full = resolve(part, vcwd)
+        if full and os.path.isdir(full):
+            for auto in PYTHON_AUTOLOAD:
+                if script_mentions(os.path.join(full, auto), vcwd):
+                    return (f"{name} puts {part[:30]} on the import path, and {auto} there is "
+                            f"run at startup by every python process")
+            try:
+                for fn in sorted(os.listdir(full))[:200]:
+                    if fn.endswith(".pth") and script_mentions(os.path.join(full, fn), vcwd):
+                        return f"{name} puts {part[:30]} on the import path, and {fn} executes at startup"
+            except OSError:
+                pass
+    return None
+
+
+
+CONTAINER_VERBS = {"docker", "podman", "nerdctl", "finch", "lima"}
+
+
+def mounts_guarded_tree(verb, toks, vcwd):
+    """A bind mount hands the tree to something this guard cannot see inside.
+
+    `docker run -v $(pwd):/w alpine rm /w/prot*/canary.txt` touches no path the
+    guard recognises: the deletion happens at /w, which exists only inside the
+    container. The mount is the alias, so it is judged like one. A source that
+    cannot be resolved now (`$(pwd)`, a glob) fails closed, and a read-only
+    mount still hands over a secret, so secrets are refused either way.
+    """
+    if verb not in CONTAINER_VERBS:
+        return None
+    specs = []
+    for i, t in enumerate(toks):
+        if t in ("-v", "--volume", "--mount") and i + 1 < len(toks):
+            specs.append(toks[i + 1])
+        elif t.startswith(("--volume=", "--mount=")):
+            specs.append(t.split("=", 1)[1])
+        elif t.startswith("-v") and len(t) > 2:
+            specs.append(t[2:])
+    for spec in specs:
+        read_only, src = False, None
+        if "=" in spec and ("source=" in spec or "src=" in spec or spec.startswith("type=")):
+            fields = dict(kv.split("=", 1) for kv in spec.split(",") if "=" in kv)
+            src = fields.get("source") or fields.get("src")
+            read_only = "readonly" in spec or fields.get("ro") in ("true", "1")
+        else:
+            parts = spec.split(":")
+            src = parts[0] if len(parts) >= 2 else (spec if re.search(r"[$`*?\[]", spec) else None)
+            read_only = "ro" in parts[2:]
+        if not src:
+            continue
+        if re.search(r"[$`*?\[]", src):
+            return "a bind mount whose source cannot be resolved at check time"
+        full = resolve(_clean(src), vcwd)
+        if not full:
+            continue
+        for tree in cfg["_protected_abs"]:
+            if not (within(tree, full) or within(full, tree)):
+                continue
+            is_secret = any(within(tree, sec) or within(sec, tree)
+                            for sec in cfg.get("_secret_abs", []))
+            if is_secret or not read_only:
+                return (f"a bind mount of {src[:40]} hands "
+                        f"{os.path.basename(tree)} to a container this guard cannot see inside")
+    return None
 
 
 def runs_file_contents(verb, toks):
@@ -638,6 +738,9 @@ for idx, toks in enumerate(live_segments):
             # `PATH=work:$PATH rmx` runs work/rmx, and nothing in the command
             # line says so. The directories it prepends are where to look.
             path_dirs += [d for d in value.split(":") if d and "$" not in d]
+        risk = env_assignment_risk(name, value, vcwd)
+        if risk:
+            verdict("deny", risk)
         # `S=secrets/.env; cat $S` hid a secret behind one letter.
         if cfg.get("_secret_abs") and secret_mentions(value, vcwd, True):
             verdict("deny", "a variable in this command points at a secret path; "
@@ -674,6 +777,9 @@ for idx, toks in enumerate(live_segments):
             verdict("deny", f"find starts above {os.path.basename(tree)} and would "
                             f"{'act on' if acting else 'select'} what is inside it; "
                             f"{'secrets are denied to every verb' if is_secret else 'that tree is protected'}")
+    mounted = mounts_guarded_tree(verb, toks, vcwd)
+    if mounted:
+        verdict("deny", mounted)
     landed = copy_lands_in_protected(verb, toks, vcwd)
     if landed:
         verdict("deny", f"'{verb}' would put a file at {landed}, inside the protected tree, "

@@ -40,7 +40,9 @@ that proves it fires by deliberately doing the thing it must catch.
 import datetime
 import json
 import os
+import re
 import sys
+import unicodedata
 
 _LAST_INPUT = {}
 
@@ -148,6 +150,27 @@ def shares_inode(path, trees, cap=50_000):
     return False
 
 
+def declared_paths(pattern, base):
+    """Every real path a policy entry names.
+
+    Two entries a person would reasonably write protected NOTHING, silently:
+    `~/secrets` (nobody expanded the tilde, so it guarded a directory literally
+    called `~`) and `infra/*/prod` (a wildcard is not a path, so it resolved to
+    something that does not exist). Silence is the worst possible answer here,
+    because the settings file then claims a protection that is not there.
+    """
+    p = os.path.expanduser(str(pattern))
+    if re.search(r"[*?\[]", p):
+        import glob as _glob
+        root = p if os.path.isabs(p) else os.path.join(base, p)
+        hits = sorted({os.path.realpath(h) for h in _glob.glob(root, recursive=True)})
+        if hits:
+            return hits
+        print(f"guardrails: the policy entry {pattern!r} matches nothing on disk right now; "
+              f"it protects a future path only", file=sys.stderr)
+    return [resolve(p, base)]
+
+
 def load_config():
     """Read config.json, or refuse.
 
@@ -166,10 +189,10 @@ def load_config():
     if missing:
         die(f"policy file is missing required key(s): {', '.join(missing)}")
 
-    cfg["_allowed_tree_abs"] = resolve(cfg["allowed_tree"], LAB)
-    cfg["_protected_abs"] = [resolve(p, LAB) for p in cfg["protected_paths"]]
+    cfg["_allowed_tree_abs"] = resolve(os.path.expanduser(cfg["allowed_tree"]), LAB)
+    cfg["_protected_abs"] = [q for p in cfg["protected_paths"] for q in declared_paths(p, LAB)]
     # Content-is-the-asset paths: every verb is denied on these, reads included.
-    cfg["_secret_abs"] = [resolve(p, LAB) for p in cfg.get("secret_paths", [])]
+    cfg["_secret_abs"] = [q for p in cfg.get("secret_paths", []) for q in declared_paths(p, LAB)]
     # The guard protects itself. An agent that can rewrite config.json or delete
     # gates/bash_guard.py can turn every other rule off, so those paths join the
     # protected list unless the policy switches it off on purpose.
@@ -194,6 +217,13 @@ def load_config():
             r = resolve(rel, root)
             if r not in cfg["_protected_abs"]:
                 cfg["_protected_abs"].append(r)
+    # The audit log is the evidence. A client who moves it out of the guarded
+    # tree (an absolute path, or ../logs/) could have it deleted by the agent it
+    # is meant to record, so wherever it is, it joins the protected list.
+    if cfg.get("self_protect", True) and cfg.get("audit_log"):
+        log = resolve(os.path.expanduser(cfg["audit_log"]), LAB)
+        if log and log not in cfg["_protected_abs"]:
+            cfg["_protected_abs"].append(log)
     cfg["_protected_abs"] += [p for p in cfg["_secret_abs"] if p not in cfg["_protected_abs"]]
     if not cfg["_protected_abs"]:
         die("policy file lists no protected_paths; refusing to run a guard "
@@ -264,6 +294,15 @@ CASE_INSENSITIVE = _fs_is_case_insensitive()
 
 
 def _cmp(path):
+    """One spelling of a path, so two names for the same file compare equal.
+
+    macOS stores what you typed but treats composed and decomposed Unicode as
+    the same file, so a policy naming `protégé/` and a command spelling it
+    `prote\u0301gé/` were the same directory to the filesystem and two
+    different strings to the guard. Normalising makes them one again; for
+    ASCII, which is most policies, this changes nothing.
+    """
+    path = unicodedata.normalize("NFC", path)
     return path.lower() if CASE_INSENSITIVE else path
 
 
