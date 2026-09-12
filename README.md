@@ -2,7 +2,7 @@
 
 Fail-closed guardrails for Claude Code (and any agent that runs shell commands and edits files through hooks). Five PreToolUse hooks, one policy file, an audit log, a real-time alert on every block, a monthly report, an exposure report for the setup you have today, CI templates that prove the policy on every push, and a test suite that proves every block.
 
-    ./tests/run_tests.sh      # 247 assertions, all green
+    ./tests/run_tests.sh      # 261 assertions, all green
 
 Built after an evening of breaking my own deny-list. The story is in the [write-up](https://agent-guardrails.meshulam791.workers.dev/), the short version is below.
 
@@ -60,7 +60,7 @@ An agent that can delete the guard is not guarded. `self_protect` (on by default
 
 ## The red team: measured, not claimed
 
-    python3 redteam/attack.py      # 316 attacks, 0 leaks
+    python3 redteam/attack.py      # 332 attacks, 0 leaks
 
 Every other test here asks the guard for a verdict and believes it. This one builds a throwaway sandbox with a canary in a protected path and a fake credential in a secret path, asks the guard, **runs the command anyway**, and compares the two. Four outcomes, all counted:
 
@@ -117,7 +117,7 @@ A git hook fires on the next commit, a workflow on the next push, `CLAUDE.md` st
 
 Round five stopped attacking Bash and went after the other three doors, and after the guards themselves as programs:
 
-    python3 redteam/tools.py      # 69 cases: Write, Edit, MultiEdit, NotebookEdit, Read, Grep, Glob, MCP, unknown tools
+    python3 redteam/tools.py      # 78 cases: Write, Edit, MultiEdit, NotebookEdit, Read, Grep, Glob, MCP, unknown tools
 
 Four failures, and one of them is the most dangerous kind of bug in a thing like this:
 
@@ -224,6 +224,24 @@ The same round added the files a real repository executes without anyone typing 
 And two things that keep the promise true after the day of the install. The delivery report no longer says a hook is "wired", it **runs** every hook in `.claude/settings.json` with a payload it must refuse, which catches a hook that has moved or lost its executable bit (a hook Claude Code cannot execute is a broken gate, and a broken gate does not stop the tool call). `care/drift.sh` lists credential-looking files and production-looking directories that have appeared since the policy was written and are not covered by it.
 
 
+Round ten changed the fixture instead of the attack, and found the worst hole in the ten rounds.
+
+Every sandbox here declares `protected/`, a directory at the top of the repository. A client declares `infra/prod`, whose parent is an ordinary directory. With a policy shaped like theirs:
+
+    rm -rf infra          # allowed, for nine rounds
+
+Every path check in the guard asked one question: is this path **inside** a guarded tree. The reverse never came up, because in the lab the parent of `protected/` is the repository root and `rm -rf .` is already a deny pattern. The fixture hid it, not the logic. `mv infra infra.bak`, `rm -rf cfg` where the secret is `cfg/.env`, `sh -c 'rm -rf infra'`, `python3 -c "shutil.rmtree('infra')"`, `echo infra | xargs rm -rf` and `find . -name infra -exec rm -rf {} +` were all allowed the same way.
+
+A path that **contains** a guarded tree is now refused, but only for verbs that destroy or move (`destructive_verbs` in the policy), including the ones hiding inside an interpreter payload and the ones at the end of a pipeline. `git add .`, `mkdir -p infra` and `rm -f infra/README.md` are ordinary work and stay allowed: an ancestor is not a target until something deletes it.
+
+The same round closed the door that lets a tool skip every rule above by carrying a command instead of a path:
+
+    mcp__shell__execute {"command": "rm -rf infra"}     # allowed
+    mcp__desktop__execute_command {"command": "cat cfg/.env"}
+
+An MCP server that runs shell commands walked past every path rule, because `rm -rf infra` is not a path and was never judged as a command. The MCP gate and the catch-all now recognise a carried command (by the key it arrives under, or by a shell metacharacter no path contains) and **ask the Bash gate**, so one rule set covers both doors. `mcp__shell__execute {"command": "npm test"}` is untouched.
+
+
 ## MCP tools are a second set of hands
 
 Hooks on Bash and Write cover the tools Claude Code ships with. An MCP filesystem server, a database tool or a deploy helper reaches the same disk through a different door, and none of the rules above see it. `gates/mcp_guard.py` walks every string in an MCP payload, however deeply nested, and denies the call when one resolves inside a protected or secret path. Calls with no path, or a path elsewhere, pass untouched.
@@ -270,7 +288,7 @@ Eleven assertions against the installed policy. Wire the same command into CI an
     ci/                    GitHub Actions and GitLab CI templates
     templates/             cursor-rules.mdc, settings-mcp-allowlist.json
     docs/                  CONTROL-MAPPING.md, AGENT-SAFETY-STACK.md, DEVELOPERS.md
-    tests/run_tests.sh     the lab suite (247 assertions); tests/smoke.sh for installed copies
+    tests/run_tests.sh     the lab suite (261 assertions); tests/smoke.sh for installed copies
     .claude/settings.json  the five PreToolUse hooks (Bash, writes, reads, MCP, catch-all)
 
 `stop_gate.sh` is an optional Stop hook that refuses to end a session until a named deliverable exists and has real content. It is tested but not wired by default.
@@ -288,7 +306,7 @@ This kit is not impenetrable and nothing that runs inside the agent's own proces
 - **Writes outside the repository from a shell command.** The Write and Edit tools are confined to the allowed tree; a Bash command is judged on the paths the policy declares, so `echo x > /tmp/scratch` is allowed on purpose. The files outside the repository that decide what runs later (`~/.claude/settings.json`, shell rc files, `~/.gitconfig`, `~/.ssh/config`, LaunchAgents) are in `home_execution_surface` and denied; everything else in the home directory is not.
 - **A compromised host.** These are hooks, not a sandbox. Unattended runs belong in a container with no network path to production.
 - **Server-side truth.** A force push blocked on the laptop is still worth blocking on the server: branch protection and a pre-receive hook are the copy that survives a bypassed client.
-- **Unknown unknowns.** 316 attacks and 69 tool cases pass today. The number of attacks nobody has written yet is not zero, which is why `redteam/attack.py` is in the repo and why a working bypass is welcome as an issue.
+- **Unknown unknowns.** 332 attacks and 78 tool cases pass today. The number of attacks nobody has written yet is not zero, which is why `redteam/attack.py` is in the repo and why a working bypass is welcome as an issue.
 
 The honest claim is narrow: inside Claude Code, on the paths you declare, the guard fails closed, refuses what it cannot parse, protects its own files, and every claim in this README is a test you can run.
 

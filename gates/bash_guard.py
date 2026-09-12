@@ -81,6 +81,61 @@ def _clean(token):
     return t
 
 
+DESTRUCTIVE_WORDS = re.compile(
+    r"\b(rm|rmdir|unlink|mv|rename|shred|srm|trash|rimraf|rmtree|remove|move|delete|truncate)\b",
+    re.I)
+
+
+def wipes_guarded_tree(token, vcwd):
+    """Does this path CONTAIN something guarded? `rm -rf infra` and infra/prod.
+
+    Every path check in this guard asked one question: is the path INSIDE a
+    guarded tree. The reverse never came up, because in the lab the protected
+    directory sits at the top of the repository and its parent is the root,
+    which a deny pattern already refuses. In a real installation the declared
+    path is `infra/prod`, its parent is an ordinary directory, and `rm -rf
+    infra` was allowed for nine rounds. The fixture hid it, not the logic.
+
+    Only for verbs that destroy or move, so `git add .` and `mkdir -p infra`
+    are untouched: an ancestor is not a target until something deletes it.
+    """
+    t = _clean(token)
+    if not t or t.startswith("-"):
+        return None
+    r = resolve(t, vcwd)
+    if not r:
+        return None
+    for tree in cfg["_protected_abs"]:
+        if r != tree and within(tree, r):
+            return tree
+    return None
+
+
+def wipes_any(token, vcwd, deep, depth=0):
+    """wipes_guarded_tree, but looking inside payloads the way mentions_protected does."""
+    hit = wipes_guarded_tree(token, vcwd)
+    if hit:
+        return hit
+    for piece in slash_paths(token):
+        hit = wipes_guarded_tree(piece, vcwd)
+        if hit:
+            return hit
+    if not deep or depth >= 2 or not re.search(r"[\s'\"()]", token):
+        return None
+    inner = []
+    try:
+        inner = lex(token)
+    except ValueError:
+        pass
+    inner += [m for pair in re.findall(r"'([^']*)'|\"([^\"]*)\"", token) for m in pair if m]
+    inner += re.findall(r"[A-Za-z0-9_.~@%+=:,\-/]+", token)
+    for t in {t for t in inner if t and t != token}:
+        hit = wipes_any(t, vcwd, True, depth + 1)
+        if hit:
+            return hit
+    return None
+
+
 def touches_protected(token, vcwd):
     t = _clean(token)
     if not t or t.startswith("-"):
@@ -814,7 +869,18 @@ def find_walks_into(toks, vcwd):
             if tree == start or not within(tree, start):
                 continue                  # only a STRICT ancestor walks into it
             is_secret = any(within(tree, sec) for sec in cfg.get("_secret_abs", []))
-            hits = _tree_has_match(tree, pats) if pats else True
+            # A filter can select the tree's own PARENT: `find . -name infra
+            # -exec rm -rf {} +` never matches anything inside infra/prod and
+            # deletes it anyway. So the path from the start down to the tree is
+            # checked as well as the contents.
+            on_the_way = []
+            rel = os.path.relpath(tree, start)
+            walked = start
+            for part in rel.split(os.sep):
+                walked = os.path.join(walked, part)
+                on_the_way.append((part, walked))
+            hits = (_tree_has_match(tree, pats)
+                    or any(_find_selects(name, full, pats) for name, full in on_the_way)) if pats else True
             if not hits:
                 continue                  # the filter cannot select anything in there
             if acting or is_secret:
@@ -931,6 +997,8 @@ segments = []
 vcwd = session_cwd
 # cwd is tracked across `cd` because `cd somewhere && rm ../x` changes what a
 # relative path means partway through the command.
+piped = "|" in tokens or "|&" in tokens
+any_destructive, any_ancestor = False, None
 live_segments = [t for t in raw_segments if t]
 last_idx = len(live_segments) - 1
 for idx, toks in enumerate(live_segments):
@@ -956,8 +1024,13 @@ for idx, toks in enumerate(live_segments):
     if not toks:
         continue
 
-    verb = os.path.basename(toks[0]).lower()
+    verb = os.path.basename(ansi_c_decode(toks[0])).lower()
     deep = verb in INTERPRETERS
+    # `sh -c 'rm -rf infra'` hides the verb inside the payload, so an
+    # interpreter counts as destructive when its payload says so.
+    destructive = verb in cfg.get("destructive_verbs", []) or (
+        deep and bool(DESTRUCTIVE_WORDS.search(" ".join(toks[1:]))))
+    any_destructive = any_destructive or destructive
     for d in path_dirs:
         # `PATH=work:$PATH rmx` runs work/rmx and says nothing about it.
         if script_mentions(os.path.join(d, verb), vcwd):
@@ -1014,11 +1087,28 @@ for idx, toks in enumerate(live_segments):
             continue
         if is_exclusion_token(toks, i):
             continue
+        doomed = wipes_any(a, vcwd, deep)
+        if doomed:
+            any_ancestor = any_ancestor or doomed
+        if destructive and doomed:
+            if True:
+                shown = os.path.relpath(doomed, resolve(".", vcwd)) if resolve(".", vcwd) else doomed
+                verdict("deny", f"'{verb}' would take {shown} "
+                                f"with it: that guarded path is inside the directory this command "
+                                f"is about to destroy or move")
         if cfg.get("_secret_abs") and secret_mentions(a, vcwd, deep):
             verdict("deny", f"'{verb}' would touch a secret path; secrets are denied to every verb, "
                             f"reads included")
         if mentions_protected(a, vcwd, deep):
             touches = True
+
+if piped and any_destructive and any_ancestor:
+    # `echo infra | xargs rm -rf` puts the path in one segment and the verb that
+    # destroys it in the next. Only for pipelines: `ls infra && rm work/tmp` is
+    # two unrelated commands and stays allowed.
+    shown = os.path.relpath(any_ancestor, resolve(".", session_cwd)) or any_ancestor
+    verdict("deny", f"this pipeline names a directory that contains {shown} and ends in a verb "
+                    f"that destroys or moves what it is given")
 
 if not touches:
     # Last stop: a command can reference nothing protected and still be the

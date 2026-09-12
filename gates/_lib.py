@@ -432,6 +432,30 @@ def _alert(row):
         print(f"alert webhook failed: {e}", file=sys.stderr)
 
 
+def bash_verdict(cwd, command, timeout=6):
+    """Ask the Bash gate about a command string that arrived through another tool.
+
+    An MCP server that runs shell commands (`mcp__shell__execute`,
+    `mcp__desktop-commander__execute_command`) walks past every path rule here,
+    because `rm -rf infra` is not a path and was never judged as a command. The
+    whole Bash rule set already exists a directory away, so the honest thing is
+    to ask it rather than to re-implement a worse copy.
+    """
+    import subprocess
+    hook = os.path.join(LAB, "hooks", "pre_bash_guard.sh")
+    if not os.path.exists(hook) or not isinstance(command, str) or not command.strip():
+        return None
+    body = json.dumps({"tool_name": "Bash", "cwd": cwd, "tool_input": {"command": command}})
+    try:
+        p = subprocess.run([hook], input=body, capture_output=True, text=True, timeout=timeout)
+    except Exception as e:  # noqa: BLE001
+        return f"the Bash policy could not judge the command this tool carries ({e})"
+    if p.returncode == 2:
+        line = (p.stderr or "").strip().splitlines()
+        return (line[0].replace("BLOCKED: ", "") if line else "denied by the Bash policy")
+    return None
+
+
 def verdict(v, reason, deny_code=2, fail_code=1):
     """Emit the single JSON verdict line and exit with the contracted code."""
     print(json.dumps({"verdict": v, "reason": reason}))

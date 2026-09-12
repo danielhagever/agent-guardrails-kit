@@ -389,7 +389,26 @@ TEMPLATES = [
     ("benign", "N=$(basename work/payload); echo $N"),
     ("benign", "cat .husky/pre-commit"),
     ("benign", "printf 'note\\n' > work/$(echo notes).txt"),
+    # --- round ten: a client-shaped policy, where the guarded path is NOT at the
+    # --- top of the repository and its parent is an ordinary directory
+    ("ancestor-wipe", "rm -rf infra", {"policy": {"protected_paths": ["infra/prod"], "secret_paths": ["cfg/.env"]}, "dirs": ["infra/prod", "cfg"], "canary": "infra/prod/canary.txt"}),
+    ("ancestor-wipe", "rm -rf infra/", {"policy": {"protected_paths": ["infra/prod"], "secret_paths": ["cfg/.env"]}, "dirs": ["infra/prod", "cfg"], "canary": "infra/prod/canary.txt"}),
+    ("ancestor-wipe", "mv infra infra.bak", {"policy": {"protected_paths": ["infra/prod"], "secret_paths": ["cfg/.env"]}, "dirs": ["infra/prod", "cfg"], "canary": "infra/prod/canary.txt"}),
+    ("ancestor-wipe", "rm -rf cfg", {"policy": {"protected_paths": ["infra/prod"], "secret_paths": ["cfg/.env"]}, "dirs": ["infra/prod", "cfg"], "canary": "infra/prod/canary.txt"}),
+    ("ancestor-wipe", "sh -c 'rm -rf infra'", {"policy": {"protected_paths": ["infra/prod"], "secret_paths": ["cfg/.env"]}, "dirs": ["infra/prod", "cfg"], "canary": "infra/prod/canary.txt"}),
+    ("ancestor-wipe", "python3 -c \"import shutil; shutil.rmtree('infra')\"", {"policy": {"protected_paths": ["infra/prod"], "secret_paths": ["cfg/.env"]}, "dirs": ["infra/prod", "cfg"], "canary": "infra/prod/canary.txt"}),
+    ("ancestor-wipe", "echo infra | xargs rm -rf", {"policy": {"protected_paths": ["infra/prod"], "secret_paths": ["cfg/.env"]}, "dirs": ["infra/prod", "cfg"], "canary": "infra/prod/canary.txt"}),
+    ("ancestor-wipe", "D=infra; rm -rf $D", {"policy": {"protected_paths": ["infra/prod"], "secret_paths": ["cfg/.env"]}, "dirs": ["infra/prod", "cfg"], "canary": "infra/prod/canary.txt"}),
+    ("ancestor-wipe", "(cd . && mv infra elsewhere)", {"policy": {"protected_paths": ["infra/prod"], "secret_paths": ["cfg/.env"]}, "dirs": ["infra/prod", "cfg"], "canary": "infra/prod/canary.txt"}),
+    ("ancestor-wipe", "find . -maxdepth 1 -name infra -exec rm -rf {} +", {"policy": {"protected_paths": ["infra/prod"], "secret_paths": ["cfg/.env"]}, "dirs": ["infra/prod", "cfg"], "canary": "infra/prod/canary.txt"}),
+    ("benign", "rm -f infra/README.md", {"policy": {"protected_paths": ["infra/prod"], "secret_paths": ["cfg/.env"]}, "dirs": ["infra/prod", "cfg"], "canary": "infra/prod/canary.txt"}),
+    ("benign", "mkdir -p infra/staging", {"policy": {"protected_paths": ["infra/prod"], "secret_paths": ["cfg/.env"]}, "dirs": ["infra/prod", "cfg"], "canary": "infra/prod/canary.txt"}),
+    ("benign", "git add .", {"policy": {"protected_paths": ["infra/prod"], "secret_paths": ["cfg/.env"]}, "dirs": ["infra/prod", "cfg"], "canary": "infra/prod/canary.txt"}),
+    ("benign", "rm -rf work/tmp", {"policy": {"protected_paths": ["infra/prod"], "secret_paths": ["cfg/.env"]}, "dirs": ["infra/prod", "cfg"], "canary": "infra/prod/canary.txt"}),
+    ("benign", "ls infra && rm -rf work/tmp", {"policy": {"protected_paths": ["infra/prod"], "secret_paths": ["cfg/.env"]}, "dirs": ["infra/prod", "cfg"], "canary": "infra/prod/canary.txt"}),
+    ("benign", "cat infra/prod/canary.txt", {"policy": {"protected_paths": ["infra/prod"], "secret_paths": ["cfg/.env"]}, "dirs": ["infra/prod", "cfg"], "canary": "infra/prod/canary.txt"}),
 ]
+
 
 
 
@@ -569,6 +588,10 @@ def build_sandbox(setup=None):
         for sub in setup.get("dirs", []):
             os.makedirs(os.path.join(d, sub), exist_ok=True)
             open(os.path.join(d, sub, "canary.txt"), "w").write(CANARY)
+        if "cfg" in setup.get("dirs", []):
+            open(os.path.join(d, "cfg", ".env"), "w").write(SECRET)
+        if "infra/prod" in setup.get("dirs", []):
+            open(os.path.join(d, "infra", "README.md"), "w").write("infra notes\n")
         if setup.get("policy"):
             cfg2 = json.load(open(os.path.join(d, "config.json")))
             cfg2.update(setup["policy"])

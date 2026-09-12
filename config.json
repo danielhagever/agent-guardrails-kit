@@ -338,5 +338,20 @@
     ".config/environment.d"
   ],
   "_home_execution_surface_comment": "The same idea as execution_surface, outside the repository. Writing ~/.claude/settings.json injects env into every future agent shell, ~/.zshrc runs on the next terminal, ~/.gitconfig can set core.hooksPath for every repo on the machine, and ~/.ssh/config can set a ProxyCommand. Reading them stays allowed. Set protect_home_surface to false to switch this off.",
-  "protect_home_surface": true
+  "protect_home_surface": true,
+  "destructive_verbs": [
+    "rm",
+    "rmdir",
+    "unlink",
+    "mv",
+    "rename",
+    "shred",
+    "srm",
+    "trash",
+    "rimraf",
+    "ditto",
+    "gio",
+    "gvfs-trash"
+  ],
+  "_destructive_verbs_comment": "Verbs that destroy or move what they are given. For these, and only these, a path that CONTAINS a guarded tree is refused as well as a path inside one: `rm -rf infra` takes infra/prod with it while naming nothing protected. Scoped this way so that `git add .` and `mkdir -p infra` stay ordinary work."
 }

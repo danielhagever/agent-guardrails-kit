@@ -173,6 +173,28 @@ CASES = [
     ("Bash: a glob over the whole tree", "pre_bash_guard.sh", "Bash",
      {"command": "ls work/tree/*/*/*.txt"}, "any"),
     # --- round eight: the tools that do not exist yet
+    # --- round ten: a tool that carries a COMMAND, and one that deletes a parent
+    ("MCP server that runs a shell command", "pre_mcp_guard.sh", "mcp__shell__execute",
+     {"command": "rm -rf protected"}, "deny"),
+    ("MCP shell reading a secret", "pre_mcp_guard.sh", "mcp__desktop__execute_command",
+     {"command": "cat secrets/.env"}, "deny"),
+    ("MCP shell running ordinary work", "pre_mcp_guard.sh", "mcp__shell__execute",
+     {"command": "ls work"}, "allow"),
+    ("MCP tool that deletes a directory holding a secret", "pre_mcp_guard.sh", "mcp__fs__delete",
+     {"path": "."}, "deny"),
+    # Pointing ANY MCP tool at a directory that contains a secret is refused,
+    # listers included: this gate cannot tell a reader from a writer, and the
+    # policy says the content of a secret path is never handed to a tool.
+    ("MCP listing a directory that holds a secret", "pre_mcp_guard.sh", "mcp__fs__list_directory",
+     {"path": "."}, "deny"),
+    ("MCP listing a directory that does not", "pre_mcp_guard.sh", "mcp__fs__list_directory",
+     {"path": "work"}, "allow"),
+    ("MCP deleting a directory that holds nothing guarded", "pre_mcp_guard.sh", "mcp__fs__delete",
+     {"path": "work/sub"}, "allow"),
+    ("An unknown tool carrying a command", "pre_any_guard.sh", "FutureRunner",
+     {"script": "rm -rf protected"}, "deny"),
+    ("An unknown tool carrying a harmless command", "pre_any_guard.sh", "FutureRunner",
+     {"script": "echo hello"}, "allow"),
     ("A tool nobody predicted, writing into protected", "pre_any_guard.sh", "FutureEditTool",
      {"target": "protected/canary.txt"}, "deny"),
     ("A tool nobody predicted, reading a secret", "pre_any_guard.sh", "ApplyPatch",

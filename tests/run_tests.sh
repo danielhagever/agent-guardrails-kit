@@ -630,6 +630,56 @@ check "drift check fails once an uncovered credential file appears" 1 $?
 rm -f scratch/leaked.pem
 
 
+# --- round ten: the guarded path is not always at the top of the repository ---
+# The lab's protected directory sits at the root, where `rm -rf <parent>` is
+# `rm -rf .` and a deny pattern already refuses it. A client declares
+# infra/prod, whose parent is an ordinary directory, so the case only appears
+# with a policy shaped like theirs. Built here on purpose.
+CLIENTBOX=${TMPDIR:-/tmp}/guardrails_client.$$
+mkdir -p "$CLIENTBOX/infra/prod" "$CLIENTBOX/cfg" "$CLIENTBOX/src"
+cp -R "$LAB/gates" "$LAB/hooks" "$CLIENTBOX/" 2>/dev/null
+rm -rf "$CLIENTBOX/gates/__pycache__"
+echo "replicas: 3" > "$CLIENTBOX/infra/prod/deploy.yaml"
+echo "K=v" > "$CLIENTBOX/cfg/.env"
+echo "notes" > "$CLIENTBOX/infra/README.md"
+python3 -c "
+import json, sys
+c = json.load(open('$LAB/config.json'))
+c.update(allowed_tree='.', protected_paths=['infra/prod'], secret_paths=['cfg/.env'],
+         audit_log='audit.jsonl', alert_webhook='')
+json.dump(c, open('$CLIENTBOX/config.json', 'w'), indent=2)"
+cj() { printf '{"tool_name":"%s","cwd":"%s","tool_input":%s}' "$1" "$CLIENTBOX" "$2"; }
+printf '%s' "$(cj Bash '{"command":"rm -rf infra"}')" | "$CLIENTBOX/hooks/pre_bash_guard.sh" 2>/dev/null >/dev/null
+check "rm -rf the PARENT of the guarded tree blocked" 2 $?
+printf '%s' "$(cj Bash '{"command":"mv infra infra.bak"}')" | "$CLIENTBOX/hooks/pre_bash_guard.sh" 2>/dev/null >/dev/null
+check "moving that parent away blocked" 2 $?
+printf '%s' "$(cj Bash '{"command":"rm -rf cfg"}')" | "$CLIENTBOX/hooks/pre_bash_guard.sh" 2>/dev/null >/dev/null
+check "removing the directory that holds the secret blocked" 2 $?
+printf '%s' "$(cj Bash "{\"command\":\"sh -c 'rm -rf infra'\"}")" | "$CLIENTBOX/hooks/pre_bash_guard.sh" 2>/dev/null >/dev/null
+check "the same through an interpreter payload blocked" 2 $?
+printf '%s' "$(cj Bash '{"command":"echo infra | xargs rm -rf"}')" | "$CLIENTBOX/hooks/pre_bash_guard.sh" 2>/dev/null >/dev/null
+check "a pipeline that ends in a destroying verb blocked" 2 $?
+printf '%s' "$(cj Bash "{\"command\":\"find . -maxdepth 1 -name infra -exec rm -rf {} +\"}")" | "$CLIENTBOX/hooks/pre_bash_guard.sh" 2>/dev/null >/dev/null
+check "a find filter that selects the parent blocked" 2 $?
+printf '%s' "$(cj Bash '{"command":"rm -f infra/README.md"}')" | "$CLIENTBOX/hooks/pre_bash_guard.sh" 2>/dev/null >/dev/null
+check "removing a sibling file inside that parent allowed" 0 $?
+printf '%s' "$(cj Bash '{"command":"git add ."}')" | "$CLIENTBOX/hooks/pre_bash_guard.sh" 2>/dev/null >/dev/null
+check "git add . allowed (an ancestor is not a target until something deletes it)" 0 $?
+printf '%s' "$(cj Bash '{"command":"mkdir -p infra/staging"}')" | "$CLIENTBOX/hooks/pre_bash_guard.sh" 2>/dev/null >/dev/null
+check "mkdir inside that parent allowed" 0 $?
+printf '%s' "$(cj Bash '{"command":"ls infra && rm -rf src/tmp"}')" | "$CLIENTBOX/hooks/pre_bash_guard.sh" 2>/dev/null >/dev/null
+check "listing the parent and deleting something else allowed" 0 $?
+printf '%s' "$(cj mcp__shell__execute '{"command":"rm -rf infra"}')" | "$CLIENTBOX/hooks/pre_mcp_guard.sh" 2>/dev/null >/dev/null
+check "an MCP server that runs shell commands is judged by the Bash policy" 2 $?
+printf '%s' "$(cj mcp__shell__execute '{"command":"ls src"}')" | "$CLIENTBOX/hooks/pre_mcp_guard.sh" 2>/dev/null >/dev/null
+check "the same MCP server running ordinary work allowed" 0 $?
+printf '%s' "$(cj mcp__fs__delete_directory '{"path":"infra"}')" | "$CLIENTBOX/hooks/pre_mcp_guard.sh" 2>/dev/null >/dev/null
+check "an MCP delete aimed at the parent blocked" 2 $?
+printf '%s' "$(cj FutureRunner '{"script":"rm -rf infra"}')" | "$CLIENTBOX/hooks/pre_any_guard.sh" 2>/dev/null >/dev/null
+check "an unknown tool carrying that command blocked" 2 $?
+rm -rf "$CLIENTBOX"
+
+
 # --- shared layer: _run.sh and _lib.py contracts (round 5, post-refactor) ---
 SIM2=/tmp/hooks_lab_runsim
 rm -rf "$SIM2"; mkdir -p "$SIM2"
@@ -713,7 +763,7 @@ fi
 # what happened on disk. Skipped in nested runs (the interrupt test re-enters).
 if [ -z "$HOOKS_LAB_NESTED" ] && [ -z "$SKIP_REDTEAM" ]; then
   echo ""
-  echo "  tool guards under attack (69 cases: Write, Read, MCP, unknown tools, malformed input, and the clock):"
+  echo "  tool guards under attack (78 cases: Write, Read, MCP, unknown tools, malformed input, and the clock):"
   if python3 "$LAB/redteam/tools.py" > "$LAB/scratch/tools.out" 2>&1; then
     PASS=$((PASS+1)); echo "  ok   every tool guard held, and none of them crashed"
   else
@@ -721,7 +771,7 @@ if [ -z "$HOOKS_LAB_NESTED" ] && [ -z "$SKIP_REDTEAM" ]; then
     grep "FAIL" "$LAB/scratch/tools.out" | head -5
   fi
   echo ""
-  echo "  red team (316 attacks, each executed against a canary):"
+  echo "  red team (332 attacks, each executed against a canary):"
   if python3 "$LAB/redteam/attack.py" > "$LAB/scratch/redteam.out" 2>&1; then
     PASS=$((PASS+1)); echo "  ok   no attack reached the canary or the secret"
   else
