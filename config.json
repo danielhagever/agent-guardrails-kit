@@ -27,7 +27,6 @@
     "sort",
     "uniq",
     "cut",
-    "awk",
     "echo",
     "printf",
     "pwd",
@@ -170,5 +169,12 @@
     "kubectl",
     "git-bash"
   ],
-  "_interpreter_comment": "Verbs whose arguments are executable payloads. Their quoted arguments are re-lexed and scanned for bare protected names, which is how `sh -c 'rm secrets'` is caught. Add any interpreter your team uses."
+  "_interpreter_comment": "Verbs whose arguments are executable payloads. Their quoted arguments are re-lexed and scanned for bare protected names, which is how `sh -c 'rm secrets'` is caught. Add any interpreter your team uses.",
+  "secret_paths": [
+    "secrets"
+  ],
+  "_secret_comment": "Paths whose CONTENT is the asset: .env, key files, a secrets/ directory. Every verb is denied on these, reads included, because the PocketOS agent did not delete a token, it READ one. protected_paths still allow cat/grep; secret_paths do not.",
+  "self_protect": true,
+  "_self_protect_comment": "Adds this guardrails directory and the project's .claude/settings*.json to the protected list at load time. Without it an agent can delete the guard that is supposed to stop it, which was true of this kit until it was attacked.",
+  "_read_only_comment": "Verbs that can only look. Nothing that can execute belongs here: awk was on this list and on interpreter_verbs at the same time, so awk 'BEGIN{system(\"rm ...\")}' walked straight through. The read-only list wins, so it must stay boring."
 }

@@ -24,7 +24,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _lib import (in_any_protected, load_config, read_hook_input,  # noqa: E402
-                  resolve, verdict)
+                  resolve, verdict, within)
 
 cfg = load_config()
 data = read_hook_input()
@@ -53,11 +53,32 @@ INTERPRETERS = set(cfg.get("interpreter_verbs", []))
 FIND_WRITE_FLAGS = set(cfg["find_write_flags"])
 
 
+def _clean(token):
+    """Strip the punctuation tools put in front of a path.
+
+    `curl -d @secrets/x` and `tar --file=secrets/x` both hide a path behind a
+    prefix, and the first version of this guard read straight past both.
+    """
+    t = token.strip("'\"").strip()
+    for prefix in ("@", "+", ":", "~+/", "file://"):
+        if t.startswith(prefix):
+            t = t[len(prefix):]
+    return t
+
+
 def touches_protected(token, vcwd):
-    t = token.strip("'\"")
+    t = _clean(token)
     if not t or t.startswith("-"):
         return False
     return in_any_protected(resolve(t, vcwd), cfg)
+
+
+def touches_secret(token, vcwd):
+    t = _clean(token)
+    if not t or t.startswith("-"):
+        return False
+    r = resolve(t, vcwd)
+    return any(within(r, s) for s in cfg.get("_secret_abs", []))
 
 
 # A literal absolute mention catches payloads handed to interpreters
@@ -88,9 +109,49 @@ def lex(text):
     return list(lx)
 
 
+def secret_mentions(token, vcwd, deep, depth=0):
+    """Same walk as mentions_protected, but for the secret list."""
+    if touches_secret(token, vcwd):
+        return True
+    if any(touches_secret(p, vcwd) for p in slash_paths(token)):
+        return True
+    if "=" in token:
+        tail = token.split("=", 1)[1]
+        if tail and (touches_secret(tail, vcwd) or any(touches_secret(p, vcwd) for p in slash_paths(tail))):
+            return True
+    if not deep or depth >= 2 or not re.search(r"[\s'\"()]", token):
+        return False
+    try:
+        inner = lex(token)
+    except ValueError:
+        inner = re.findall(r"[A-Za-z0-9_.~@%+=:,\-]+", token)
+    if inner == [token]:
+        return False
+    return any(secret_mentions(t, vcwd, True, depth + 1) for t in inner)
+
+
 def slash_paths(token):
     """Path-like substrings (they contain a separator) inside a token."""
     return re.findall(r"[A-Za-z0-9_.~@%+=:,\-]*(?:/[A-Za-z0-9_.~@%+=:,\-]+)+/?", token)
+
+
+def dynamic_near_protected(token, vcwd):
+    """A token the shell will rewrite at run time, next to a protected name.
+
+    `rm "$(pwd)/protected/x"` and `rm $HOME/secrets/.env` cannot be resolved
+    statically: the text we see is not the path that will be opened. When such
+    a token also contains the name of something protected, the only safe answer
+    is no. Static analysis that guesses here is the bug, not the caution.
+    """
+    if not re.search(r"\$\(|\$\{|`|\$[A-Za-z_]", token):
+        return False
+    names = set()
+    for p in cfg["_protected_abs"] + cfg.get("_secret_abs", []):
+        names.add(os.path.basename(p))
+        rel = os.path.relpath(p, vcwd)
+        if not rel.startswith(".."):
+            names.add(rel)
+    return any(n and n in token for n in names)
 
 
 def mentions_protected(token, vcwd, deep, depth=0):
@@ -107,6 +168,8 @@ def mentions_protected(token, vcwd, deep, depth=0):
         return True
     if any(touches_protected(p, vcwd) for p in slash_paths(token)):
         return True
+    if dynamic_near_protected(token, vcwd):
+        return True
     # `dd of=protected/x`, `tar --file=protected/x`: the value after the first
     # `=` is a path even though the whole token never resolves to one.
     if "=" in token:
@@ -119,8 +182,15 @@ def mentions_protected(token, vcwd, deep, depth=0):
     try:
         inner = lex(token)
     except ValueError:
-        inner = re.findall(r"[A-Za-z0-9_.~@%+=:,\-]+", token)
-    if inner == [token]:
+        inner = []
+    # A python or node payload is not shell: `open('config.json','w')` keeps the
+    # filename inside quotes that shlex never sees, because the whole payload was
+    # already one shell token. Pull every quoted literal and bare word out of it.
+    inner += re.findall(r"'([^']*)'|\"([^\"]*)\"", token) and [
+        m for pair in re.findall(r"'([^']*)'|\"([^\"]*)\"", token) for m in pair if m]
+    inner += re.findall(r"[A-Za-z0-9_.~@%+=:,\-]+", token)
+    inner = [t for t in inner if t and t != token]
+    if not inner:
         return False
     return any(mentions_protected(t, vcwd, True, depth + 1) for t in inner)
 
@@ -147,7 +217,12 @@ for toks in raw_segments:
 
     # strip leading VAR=value assignments; their values still count as mentions
     while toks and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", toks[0]):
-        if mentions_protected(toks[0].split("=", 1)[1], vcwd, True):
+        value = toks[0].split("=", 1)[1]
+        # `S=secrets/.env; cat $S` hid a secret behind one letter.
+        if cfg.get("_secret_abs") and secret_mentions(value, vcwd, True):
+            verdict("deny", "a variable in this command points at a secret path; "
+                            "secrets are denied to every verb, reads included")
+        if mentions_protected(value, vcwd, True):
             touches = True
         toks.pop(0)
     if not toks:
@@ -166,6 +241,9 @@ for toks in raw_segments:
             if i + 1 < len(toks) and touches_protected(toks[i + 1], vcwd):
                 verdict("deny", f"redirection into the protected tree: {toks[i + 1]}")
             continue
+        if cfg.get("_secret_abs") and secret_mentions(a, vcwd, deep):
+            verdict("deny", f"'{verb}' would touch a secret path; secrets are denied to every verb, "
+                            f"reads included")
         if mentions_protected(a, vcwd, deep):
             touches = True
 

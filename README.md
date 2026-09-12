@@ -35,6 +35,50 @@ Scores the setup out of 10 (same rules as the browser grader), lists what an age
 - `docs/CONTROL-MAPPING.md` maps each guardrail to SOC 2, ISO 27001 and NIST CSF controls, with the evidence each one produces, for the security questionnaire.
 - `docs/AGENT-SAFETY-STACK.md` places hooks among the four other layers (scoped credentials, MCP allow-lists, sandboxed unattended runs, response), because PocketOS was a credentials failure first.
 
+## Three layers, and what each one refuses
+
+| Layer | Rule | Reads |
+|---|---|---|
+| `secret_paths` | every verb is denied, and the Read, Grep and Glob tools are denied too | **no** |
+| `protected_paths` | denied unless every verb in the command is on a short read-only allow-list | yes |
+| `deny_patterns` | destructive commands anywhere: force push, history rewrite, `curl \| sh`, `terraform destroy`, `DROP TABLE` | n/a |
+
+`secret_paths` exists because of what actually happened at PocketOS: the agent did not delete a credential, it **read** one out of a file unrelated to its task and then used it. A rule that only stops writes would not have stopped that, so `.env`, key files and anything the installer recognises as a credential store are denied to every verb, reading included.
+
+## The guard protects itself
+
+Until it was attacked, every one of these was allowed:
+
+    rm gates/bash_guard.py
+    echo '{}' > config.json
+    echo '{"hooks":{}}' > .claude/settings.json
+
+An agent that can delete the guard is not guarded. `self_protect` (on by default) adds `config.json`, `gates/`, `hooks/`, `tests/` and the project's `.claude/` to the protected list. It covers the machinery only: protecting the whole directory also blocked `git status` and writes to `scratch/`, and a guard that blocks the day job gets switched off inside a week.
+
+## The red team: measured, not claimed
+
+    python3 redteam/attack.py      # 103 attacks, 0 leaks
+
+Every other test here asks the guard for a verdict and believes it. This one builds a throwaway sandbox with a canary in a protected path and a fake credential in a secret path, asks the guard, **runs the command anyway**, and compares the two. Four outcomes, all counted:
+
+| | meaning |
+|---|---|
+| **LEAK** | allowed, and the canary changed or the secret escaped. The only real bug |
+| blocked | denied, and it truly was destructive |
+| over-blocked | denied, and nothing would have happened. The number that decides whether a team keeps it on |
+| harmless | allowed, and nothing happened |
+
+The first run found four leaks that 152 passing assertions had missed:
+
+| Attack | Why it worked |
+|---|---|
+| `awk 'BEGIN{system("rm protected/x")}'` | `awk` was on the read-only allow-list *and* the interpreter list. The read-only list won |
+| `rm "$(pwd)/protected/x"` | the path only exists after the shell expands it, so static analysis saw nothing |
+| `S=secrets/.env; cat $S` | the secret was hidden behind a one-letter variable |
+| `python3 -c "json.dump({}, open('config.json','w'))"` | the filename lived inside a Python string literal that shell lexing never sees |
+
+All four are fixed and are permanent tests. Nothing that can execute is on the read-only list any more; a token containing `$(`, backticks or `$VAR` next to a protected name fails closed; assignment values are checked against the secret list; and interpreter payloads have their string literals pulled out and resolved.
+
 ## A reader found a hole on day one, and that is the point
 
 Within an hour of the write-up going up, a reader who runs hooks on his own agent fleet asked how the guard handled quoting errors and nested interpreters. Checking his case found two commands that the guard **allowed**:
@@ -86,9 +130,17 @@ Eight assertions against the installed policy. Wire the same command into CI and
 
 Exit 0 allows, 2 denies, 1 fails (Stop gates), anything else means "the gate is broken", which the hook layer treats differently from "the gate said no". Exactly one JSON line on stdout; human text on stderr. `gates/_lib.py` holds the whole contract.
 
-## Limits
+## Limits, stated plainly
 
-Hooks run inside Claude Code. They do nothing for a token that is already in the agent's environment, for other tools that read the same files, or for an agent with a different permission model (Cursor has its own). Treat this as one layer: scoped credentials and an OS sandbox are the others.
+This kit is not impenetrable and nothing that runs inside the agent's own process can be. What it cannot do:
+
+- **A credential already in the environment.** If `AWS_SECRET_ACCESS_KEY` is exported in the shell the agent inherits, or `~/.aws/credentials` is logged in on the same machine, no hook helps. Scope the agent's identity; that is the layer that would have saved PocketOS.
+- **Tools that are not Claude Code.** Cursor has its own permission model (`templates/cursor-rules.mdc` mirrors the policy, but the enforcement point is Cursor's admin settings), and anything outside an agent harness is untouched.
+- **A compromised host.** These are hooks, not a sandbox. Unattended runs belong in a container with no network path to production.
+- **Server-side truth.** A force push blocked on the laptop is still worth blocking on the server: branch protection and a pre-receive hook are the copy that survives a bypassed client.
+- **Unknown unknowns.** 103 attacks pass today. The number of attacks nobody has written yet is not zero, which is why `redteam/attack.py` is in the repo and why a working bypass is welcome as an issue.
+
+The honest claim is narrow: inside Claude Code, on the paths you declare, the guard fails closed, refuses what it cannot parse, protects its own files, and every claim in this README is a test you can run.
 
 ## Grade your current setup first
 

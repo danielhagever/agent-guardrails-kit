@@ -443,6 +443,19 @@ if [ -z "${HOOKS_LAB_NESTED:-}" ]; then
   rm -rf "$REF"
 fi
 
+# The red team executes every attack in a sandbox and compares the verdict with
+# what happened on disk. Skipped in nested runs (the interrupt test re-enters).
+if [ -z "$HOOKS_LAB_NESTED" ] && [ -z "$SKIP_REDTEAM" ]; then
+  echo ""
+  echo "  red team (103 attacks, each executed against a canary):"
+  if python3 "$LAB/redteam/attack.py" > "$LAB/scratch/redteam.out" 2>&1; then
+    PASS=$((PASS+1)); echo "  ok   no attack reached the canary or the secret"
+  else
+    FAIL=$((FAIL+1)); echo "  FAIL the red team found a leak, see scratch/redteam.out"
+    grep "LEAK \[" "$LAB/scratch/redteam.out" | head -5
+  fi
+fi
+
 echo ""
 echo "RESULT: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

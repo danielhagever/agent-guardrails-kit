@@ -78,6 +78,24 @@ def load_config():
 
     cfg["_allowed_tree_abs"] = resolve(cfg["allowed_tree"], LAB)
     cfg["_protected_abs"] = [resolve(p, LAB) for p in cfg["protected_paths"]]
+    # Content-is-the-asset paths: every verb is denied on these, reads included.
+    cfg["_secret_abs"] = [resolve(p, LAB) for p in cfg.get("secret_paths", [])]
+    # The guard protects itself. An agent that can rewrite config.json or delete
+    # gates/bash_guard.py can turn every other rule off, so those paths join the
+    # protected list unless the policy switches it off on purpose.
+    if cfg.get("self_protect", True):
+        # The guard's own machinery only. Protecting the whole directory looked
+        # thorough and broke ordinary work: in the lab, where the kit IS the
+        # project, `git status` and writes to scratch/ all became "references
+        # the protected tree". A guard that blocks the day job gets removed.
+        selfies = [os.path.join(LAB, n) for n in
+                   ("config.json", "gates", "hooks", "tests", ".claude")]
+        selfies.append(os.path.join(os.path.dirname(LAB), ".claude"))
+        for s_ in selfies:
+            r = os.path.realpath(s_)
+            if r not in cfg["_protected_abs"]:
+                cfg["_protected_abs"].append(r)
+    cfg["_protected_abs"] += [p for p in cfg["_secret_abs"] if p not in cfg["_protected_abs"]]
     if not cfg["_protected_abs"]:
         die("policy file lists no protected_paths; refusing to run a guard "
             "that protects nothing")
