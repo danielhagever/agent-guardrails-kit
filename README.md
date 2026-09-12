@@ -35,6 +35,19 @@ Scores the setup out of 10 (same rules as the browser grader), lists what an age
 - `docs/CONTROL-MAPPING.md` maps each guardrail to SOC 2, ISO 27001 and NIST CSF controls, with the evidence each one produces, for the security questionnaire.
 - `docs/AGENT-SAFETY-STACK.md` places hooks among the four other layers (scoped credentials, MCP allow-lists, sandboxed unattended runs, response), because PocketOS was a credentials failure first.
 
+## A reader found a hole on day one, and that is the point
+
+Within an hour of the write-up going up, a reader who runs hooks on his own agent fleet asked how the guard handled quoting errors and nested interpreters. Checking his case found two commands that the guard **allowed**:
+
+    perl -e 'unlink "protected/important.txt"'      # allowed
+    sh -c 'rm protected/important.txt'              # allowed
+
+Both are one token after argv splitting, and that token resolves to nothing, so the path inside it was never examined. Worse, `python -c "import os; os.remove('protected/x')"` *was* blocked, but for the wrong reason: the old tokeniser split the raw string on `;` before parsing quotes, so the payload arrived with unbalanced quotes and was denied as unparseable. A block produced by a parse accident is the exact failure this guard claims not to have.
+
+The fix, in `gates/bash_guard.py`: lex the whole command once with quotes respected (`shlex` with `punctuation_chars`, so `; | & ( ) < >` come back as their own tokens), then re-lex the inside of quoted tokens when the verb is an interpreter (`sh`, `bash`, `python`, `perl`, `node`, `ruby`, `env`, `timeout`, `xargs`, and the rest of `interpreter_verbs` in `config.json`). Deep-scanning every token instead blocked `git commit -m "stop touching secrets"`, and a guard that blocks commit messages gets switched off by the team in a week, so the deep scan is scoped to interpreters and everything containing a path separator is checked for every verb. `dd of=secrets/x` gets the value after the first `=` checked too.
+
+All sixteen payloads are permanent tests now, alongside eleven commands that must stay allowed.
+
 ## Why an allow-list
 
 The first version was a deny-list (`rm`, `mv`, `rmdir`). It was defeated in minutes by every row in the first table above, and two of the blocks it did produce came from a quoting parse error rather than detection. A guard that is wrong in both directions cannot be reasoned about. The rule is now inverted and every bypass is a permanent regression test.
