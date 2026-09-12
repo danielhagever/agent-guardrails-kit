@@ -176,6 +176,57 @@ def within(resolved_path, tree):
     return a == b or a.startswith(b + os.sep)
 
 
+def clean_uri(token):
+    """Strip the wrappers a tool puts around a path before it becomes one.
+
+    An MCP server handed `file:///repo/secrets/.env` or `work/%2e%2e/secrets/.env`
+    walked past a guard that compared the raw string, because neither is a path
+    until something decodes it. Both forms are decoded here, and the caller
+    checks the decoded one as well as the original.
+    """
+    import urllib.parse
+    t = token.strip()
+    for scheme in ("file://localhost", "file://", "file:"):
+        if t.lower().startswith(scheme):
+            t = t[len(scheme):]
+            break
+    if "%" in t:
+        try:
+            t = urllib.parse.unquote(t)
+        except (ValueError, UnicodeDecodeError):
+            pass
+    return t
+
+
+def abs_pattern(raw, cwd):
+    """Absolute form of a glob, with the fixed part resolved for real.
+
+    normpath was not enough: on macOS `/var` is a symlink to `/private/var`, so
+    a pattern built with normpath and a target resolved with realpath disagreed
+    on the very first component, and `**/.env` was judged unable to reach a
+    secret that it plainly matches. Only the part before the first wildcard can
+    be resolved; the rest stays as written.
+    """
+    parts = raw.split(os.sep)
+    wild = next((i for i, p in enumerate(parts) if any(c in p for c in "*?[")), len(parts))
+    prefix = os.sep.join(parts[:wild]) or ("." if not raw.startswith(os.sep) else os.sep)
+    base = resolve(prefix, cwd)
+    return os.path.join(base, *parts[wild:]) if parts[wild:] else base
+
+
+def pattern_reaches(pattern_abs, target_abs):
+    """True when a glob pattern could match this path, or anything under it."""
+    import fnmatch
+    pc = pattern_abs.split(os.sep)
+    tc = target_abs.split(os.sep)
+    for i in range(min(len(pc), len(tc))):
+        if pc[i] == "**":
+            return True
+        if not fnmatch.fnmatch(_cmp(tc[i]), _cmp(pc[i])):
+            return False
+    return True
+
+
 def in_any_protected(resolved_path, cfg):
     return any(within(resolved_path, t) for t in cfg["_protected_abs"])
 

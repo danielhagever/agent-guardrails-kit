@@ -16,7 +16,8 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _lib import load_config, read_hook_input, resolve, verdict, within  # noqa: E402
+from _lib import (abs_pattern, clean_uri, load_config,  # noqa: E402
+                  pattern_reaches, read_hook_input, resolve, verdict, within)
 
 cfg = load_config()
 data = read_hook_input()
@@ -47,13 +48,20 @@ paths = []
 harvest(data.get("tool_input", {}), paths)
 
 for raw in paths:
-    # A glob is a request for whatever it matches, so strip the wildcard part
-    # and judge the directory it is rooted in; `secrets/**` must not be a way in.
+    if not isinstance(raw, str):
+        verdict("deny", f"{tool} was given a {type(raw).__name__} where a path was expected")
+    raw = clean_uri(raw)
+    # A glob is a request for whatever it matches. Judging only the part before
+    # the first wildcard let `**/.env` through, because that part is empty.
     stem = raw.split("*")[0].split("?")[0]
     rp = resolve(stem, cwd)
+    pat_abs = abs_pattern(raw, cwd)
     for s in SECRETS:
-        if within(rp, s) or within(s, rp) and stem.strip("./"):
+        if within(rp, s) or (within(s, rp) and stem.strip("./")):
             verdict("deny", f"{tool} would read inside a secret path ({raw}); "
+                            f"secrets are not readable by the agent")
+        if any(ch in raw for ch in "*?[") and pattern_reaches(pat_abs, s):
+            verdict("deny", f"{tool} uses a pattern that can match a secret path ({raw}); "
                             f"secrets are not readable by the agent")
 
 verdict("allow", "no secret path in this read")

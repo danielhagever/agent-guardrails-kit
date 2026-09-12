@@ -499,6 +499,14 @@ fi
 # what happened on disk. Skipped in nested runs (the interrupt test re-enters).
 if [ -z "$HOOKS_LAB_NESTED" ] && [ -z "$SKIP_REDTEAM" ]; then
   echo ""
+  echo "  tool guards under attack (44 cases: Write, Read, MCP, and malformed input):"
+  if python3 "$LAB/redteam/tools.py" > "$LAB/scratch/tools.out" 2>&1; then
+    PASS=$((PASS+1)); echo "  ok   every tool guard held, and none of them crashed"
+  else
+    FAIL=$((FAIL+1)); echo "  FAIL a tool guard failed or crashed, see scratch/tools.out"
+    grep "FAIL" "$LAB/scratch/tools.out" | head -5
+  fi
+  echo ""
   echo "  red team (206 attacks, each executed against a canary):"
   if python3 "$LAB/redteam/attack.py" > "$LAB/scratch/redteam.out" 2>&1; then
     PASS=$((PASS+1)); echo "  ok   no attack reached the canary or the secret"

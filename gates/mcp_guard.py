@@ -15,7 +15,9 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _lib import in_any_protected, load_config, read_hook_input, resolve, verdict, within  # noqa: E402
+from _lib import (abs_pattern, clean_uri, in_any_protected,  # noqa: E402
+                  load_config, pattern_reaches, read_hook_input, resolve,
+                  verdict, within)
 
 cfg = load_config()
 data = read_hook_input()
@@ -45,6 +47,7 @@ strings(data.get("tool_input", {}), candidates)
 for raw in candidates:
     if len(raw) > 4096:
         continue
+    raw = clean_uri(raw)
     stem = raw.split("*")[0].split("?")[0]
     if not stem or stem.startswith("-"):
         continue
@@ -52,6 +55,9 @@ for raw in candidates:
     if any(within(rp, s) or within(s, rp) for s in SECRETS):
         verdict("deny", f"{tool} was given a path inside a secret ({raw[:60]}); "
                         f"secrets are denied to every tool, MCP servers included")
+    pat_abs = abs_pattern(raw, cwd)
+    if any(ch in raw for ch in "*?[") and any(pattern_reaches(pat_abs, s) for s in SECRETS):
+        verdict("deny", f"{tool} uses a pattern that can match a secret path ({raw[:60]})")
     if in_any_protected(rp, cfg):
         # A read-shaped tool name is not proof, so protected paths are denied to
         # MCP tools outright: this gate cannot tell a reader from a writer, and

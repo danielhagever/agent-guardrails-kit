@@ -104,6 +104,23 @@ Round three went after the parts a reader of the code would trust, and found ten
 
 Case comparison is now measured against the real filesystem rather than assumed from the platform. The verb token is scanned like every other token. A command that executes a file in the workspace has that file read and judged, and `npm run x` and `make x` are followed into `package.json` and the `Makefile` **for the target that was actually asked for**, because scanning the whole file blocked `make build` over an unrelated `wipe` target sitting in the same file.
 
+Round five stopped attacking Bash and went after the other three doors, and after the guards themselves as programs:
+
+    python3 redteam/tools.py      # 44 cases: Write, Edit, MultiEdit, NotebookEdit, Read, Grep, Glob, MCP
+
+Four failures, and one of them is the most dangerous kind of bug in a thing like this:
+
+| Case | What happened |
+|---|---|
+| `Bash` with `command: 12345` | the gate **crashed**. A hook that exits with neither 0 nor 2 is a broken gate, and a broken gate does not stop the tool call, so a crash is an allow. Non-string payloads now deny |
+| `Glob **/.env` | the guard judged only the part before the first wildcard, which is empty, so a pattern that plainly matches the secret was allowed |
+| `file:///repo/secrets/.env` through MCP | not a path until something decodes it |
+| `work/%2e%2e/secrets/.env` through MCP | percent-encoded traversal, same idea |
+
+Under that sat a subtler one. Patterns were made absolute with `normpath` while targets were resolved with `realpath`, and on macOS `/var` is a symlink to `/private/var`, so the two disagreed on their first component and every pattern comparison quietly returned false. Only the part of a glob before the first wildcard can be resolved, and it now is.
+
+Nothing in the suite is slower than five seconds, including a 200KB command, five thousand tokens, deeply nested quotes and three thousand strings in one MCP payload.
+
 ## MCP tools are a second set of hands
 
 Hooks on Bash and Write cover the tools Claude Code ships with. An MCP filesystem server, a database tool or a deploy helper reaches the same disk through a different door, and none of the rules above see it. `gates/mcp_guard.py` walks every string in an MCP payload, however deeply nested, and denies the call when one resolves inside a protected or secret path. Calls with no path, or a path elsewhere, pass untouched.

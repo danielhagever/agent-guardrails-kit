@@ -26,13 +26,22 @@ import shlex
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _lib import (in_any_protected, load_config, read_hook_input,  # noqa: E402
-                  resolve, verdict, within)
+from _lib import (abs_pattern, clean_uri, in_any_protected,  # noqa: E402
+                  load_config, pattern_reaches, read_hook_input, resolve,
+                  verdict, within)
 
 cfg = load_config()
 data = read_hook_input()
 
-cmd = data.get("tool_input", {}).get("command", "")
+raw_input_block = data.get("tool_input")
+if not isinstance(raw_input_block, dict):
+    verdict("deny", "tool_input is not an object; refusing to guess what this call does")
+cmd = raw_input_block.get("command", "")
+if not isinstance(cmd, str):
+    # A number, a list or null here used to raise, and a gate that raises exits
+    # with neither 0 nor 2: the hook layer calls that broken, and a broken gate
+    # does not stop the tool call. Crashing is an allow, so it has to deny.
+    verdict("deny", f"the command is a {type(cmd).__name__}, not a string; refusing to guess")
 # Claude Code sends the session cwd. Using the hook process cwd instead made
 # the same relative command allowed or blocked depending on where the hook
 # happened to be launched from.
@@ -62,8 +71,8 @@ def _clean(token):
     `curl -d @secrets/x` and `tar --file=secrets/x` both hide a path behind a
     prefix, and the first version of this guard read straight past both.
     """
-    t = token.strip("'\"").strip()
-    for prefix in ("@", "+", ":", "~+/", "file://"):
+    t = clean_uri(token).strip("'\"").strip()
+    for prefix in ("@", "+", ":", "~+/"):
         if t.startswith(prefix):
             t = t[len(prefix):]
     return t
@@ -146,20 +155,6 @@ def brace_expand(pattern, depth=0):
     return out
 
 
-def _pattern_reaches(pattern_abs, target_abs):
-    """True when a glob pattern could match this path, or anything under it.
-
-    Component by component, so `<cwd>/protec*/canary.txt` reaches into
-    `<cwd>/protected`, and `[p]rotected` and `protecte?` do as well.
-    """
-    pc = pattern_abs.split(os.sep)
-    tc = target_abs.split(os.sep)
-    for i in range(min(len(pc), len(tc))):
-        if not fnmatch.fnmatch(tc[i], pc[i]):
-            return False
-    return True
-
-
 def glob_reaches(token, vcwd, targets):
     """Wildcards hid the path from every check above: rm protec*/canary.txt ran.
 
@@ -177,8 +172,8 @@ def glob_reaches(token, vcwd, targets):
                     return True
         except (ValueError, OSError):
             pass
-        cand_abs = cand if os.path.isabs(cand) else os.path.normpath(os.path.join(vcwd, cand))
-        if any(_pattern_reaches(cand_abs, p) for p in targets):
+        cand_abs = abs_pattern(cand, vcwd)
+        if any(pattern_reaches(cand_abs, p) for p in targets):
             return True
     return False
 
