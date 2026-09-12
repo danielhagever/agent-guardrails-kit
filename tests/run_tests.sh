@@ -114,6 +114,24 @@ for c in "git commit -m \"don't break protected stuff later\"" \
   check "still allowed: $LABEL" 0 $RC
 done
 
+# --- round four: files something else executes later (2026-09-12) ---
+mkdir -p .git/hooks .github/workflows scratch
+[ -f .git/hooks/pre-commit ] || printf '#!/bin/sh\nexit 0\n' > .git/hooks/pre-commit
+for c in "echo pwned >> .git/hooks/pre-commit" "cp README.md .git/hooks/pre-commit" "git config core.hooksPath scratch" "git config alias.st '!rm x'" "echo x >> CLAUDE.md"; do
+  LABEL=$(printf '%s' "$c" | cut -c1-40)
+  printf '%s' "$(j Bash "{\"command\":$(printf '%s' "$c" | python3 -c 'import json,sys;print(json.dumps(sys.stdin.read()))')}")" | hooks/pre_bash_guard.sh 2>/dev/null >/dev/null
+  RC=$?
+  check "execution surface blocked: $LABEL" 2 $RC
+done
+printf '%s' "$(j Bash '{"command":"git config user.name tester"}')" | hooks/pre_bash_guard.sh 2>/dev/null >/dev/null
+check "an ordinary git config is still allowed" 0 $?
+printf '%s' "$(j Bash '{"command":"cat .git/hooks/pre-commit"}')" | hooks/pre_bash_guard.sh 2>/dev/null >/dev/null
+check "reading a hook is still allowed" 0 $?
+printf -- '--- a/protected/important.txt\n+++ b/protected/important.txt\n@@ -1 +1 @@\n-a\n+b\n' > scratch/evil.diff
+printf '%s' "$(j Bash '{"command":"git apply scratch/evil.diff"}')" | hooks/pre_bash_guard.sh 2>/dev/null >/dev/null
+check "a diff that patches a protected file is blocked" 2 $?
+rm -f scratch/evil.diff
+
 # --- round three: case, the verb token itself, and scripts (2026-09-12) ---
 for c in "rm PROTECTED/important.txt" "rm Protected/Important.txt" "rm\${IFS}protected/important.txt"; do
   LABEL=$(printf '%s' "$c" | cut -c1-38)
@@ -481,7 +499,7 @@ fi
 # what happened on disk. Skipped in nested runs (the interrupt test re-enters).
 if [ -z "$HOOKS_LAB_NESTED" ] && [ -z "$SKIP_REDTEAM" ]; then
   echo ""
-  echo "  red team (178 attacks, each executed against a canary):"
+  echo "  red team (206 attacks, each executed against a canary):"
   if python3 "$LAB/redteam/attack.py" > "$LAB/scratch/redteam.out" 2>&1; then
     PASS=$((PASS+1)); echo "  ok   no attack reached the canary or the secret"
   else

@@ -123,6 +123,10 @@
     {
       "pattern": "\\bxargs\\b[^|;]*\\b(ba|z)?sh\\b",
       "reason": "xargs into a shell runs generated text"
+    },
+    {
+      "pattern": "\\bgit\\s+config\\b[^|;]*\\b(core\\.hookspath|alias\\.|core\\.editor|core\\.pager|sequence\\.editor|core\\.sshcommand|filter\\.[^ ]*\\.(clean|smudge)|diff\\.[^ ]*\\.command)",
+      "reason": "this git config key decides what git EXECUTES, so setting it is a way to run code later"
     }
   ],
   "audit_log": ".claude/guardrails-audit.jsonl",
@@ -192,5 +196,18 @@
   "_secret_comment": "Paths whose CONTENT is the asset: .env, key files, a secrets/ directory. Every verb is denied on these, reads included, because the PocketOS agent did not delete a token, it READ one. protected_paths still allow cat/grep; secret_paths do not.",
   "self_protect": true,
   "_self_protect_comment": "Adds this guardrails directory and the project's .claude/settings*.json to the protected list at load time. Without it an agent can delete the guard that is supposed to stop it, which was true of this kit until it was attacked.",
-  "_read_only_comment": "Verbs that can only look. Nothing that can execute belongs here: awk was on this list and on interpreter_verbs at the same time, so awk 'BEGIN{system(\"rm ...\")}' walked straight through. The read-only list wins, so it must stay boring."
+  "_read_only_comment": "Verbs that can only look. Nothing that can execute belongs here: awk was on this list and on interpreter_verbs at the same time, so awk 'BEGIN{system(\"rm ...\")}' walked straight through. The read-only list wins, so it must stay boring.",
+  "execution_surface": [
+    ".git/hooks",
+    ".git/config",
+    ".github/workflows",
+    ".gitlab-ci.yml",
+    ".circleci",
+    ".envrc",
+    "CLAUDE.md",
+    ".claude",
+    ".vscode/tasks.json"
+  ],
+  "_execution_surface_comment": "Files nobody runs on purpose and everybody runs anyway: a git hook fires on the next commit, a workflow on the next push, CLAUDE.md steers the agent itself. Writing to them is denied even though the canary is untouched, because the damage happens later and somewhere else. Reading stays allowed. Resolved against the project root, so an installed copy protects the repo's files, not the kit's.",
+  "protect_execution_surface": true
 }

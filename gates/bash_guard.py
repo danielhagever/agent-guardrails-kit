@@ -211,6 +211,10 @@ def script_mentions(path_token, vcwd, seen=None):
         return False
     bases = [vcwd, os.path.dirname(p)]
     for line in text.splitlines():
+        # a diff names its target as a/path and b/path; git apply strips those,
+        # and so must this, or the file it is about to patch is invisible
+        if re.match(r"^(---|\+\+\+|diff --git|rename (from|to)|Index:)", line):
+            line = re.sub(r"(^|\s)[ab]/", " ", line)
         line = line.strip().lstrip("\t")
         if not line or line.startswith("#"):
             continue

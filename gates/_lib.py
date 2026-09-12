@@ -95,6 +95,15 @@ def load_config():
             r = os.path.realpath(s_)
             if r not in cfg["_protected_abs"]:
                 cfg["_protected_abs"].append(r)
+    # Files something else executes later. Resolved against the project root, so
+    # an installed copy guards the repository's hooks and workflows rather than
+    # the kit's own directory.
+    if cfg.get("protect_execution_surface", True):
+        root = cfg["_allowed_tree_abs"]
+        for rel in cfg.get("execution_surface", []):
+            r = resolve(rel, root)
+            if r not in cfg["_protected_abs"]:
+                cfg["_protected_abs"].append(r)
     cfg["_protected_abs"] += [p for p in cfg["_secret_abs"] if p not in cfg["_protected_abs"]]
     if not cfg["_protected_abs"]:
         die("policy file lists no protected_paths; refusing to run a guard "
