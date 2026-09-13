@@ -60,7 +60,7 @@ An agent that can delete the guard is not guarded. `self_protect` (on by default
 
 ## The red team: measured, not claimed
 
-    python3 redteam/attack.py      # 400 attacks, 0 leaks (also with --shell /bin/zsh and --shell /bin/bash)
+    python3 redteam/attack.py      # 404 attacks, 0 leaks (also with --shell /bin/zsh and --shell /bin/bash)
 
 Every other test here asks the guard for a verdict and believes it. This one builds a throwaway sandbox with a canary in a protected path and a fake credential in a secret path, asks the guard, **runs the command anyway**, and compares the two. Four outcomes, all counted:
 
@@ -346,7 +346,7 @@ This kit is not impenetrable and nothing that runs inside the agent's own proces
 - **Writes outside the repository from a shell command.** The Write and Edit tools are confined to the allowed tree; a Bash command is judged on the paths the policy declares, so `echo x > /tmp/scratch` is allowed on purpose. The files outside the repository that decide what runs later (`~/.claude/settings.json`, shell rc files, `~/.gitconfig`, `~/.ssh/config`, LaunchAgents) are in `home_execution_surface` and denied; everything else in the home directory is not.
 - **A compromised host.** These are hooks, not a sandbox. Unattended runs belong in a container with no network path to production.
 - **Server-side truth.** A force push blocked on the laptop is still worth blocking on the server: branch protection and a pre-receive hook are the copy that survives a bypassed client.
-- **Unknown unknowns.** 400 attacks under sh, bash and zsh, and 78 tool cases, pass today. The number of attacks nobody has written yet is not zero, which is why `redteam/attack.py` is in the repo and why a working bypass is welcome as an issue.
+- **Unknown unknowns.** 404 attacks under sh, bash and zsh, and 78 tool cases, pass today. The number of attacks nobody has written yet is not zero, which is why `redteam/attack.py` is in the repo and why a working bypass is welcome as an issue.
 
 The honest claim is narrow: inside Claude Code, on the paths you declare, the guard fails closed, refuses what it cannot parse, protects its own files, and every claim in this README is a test you can run.
 
