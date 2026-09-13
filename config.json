@@ -113,8 +113,12 @@
       "reason": "piping text into a shell runs whatever that text turns out to be"
     },
     {
-      "pattern": "\\|\\s*(python3?|perl|ruby|node|php)\\s*(-|$)",
+      "pattern": "\\|\\s*(sudo\\s+)?(python3?(\\.\\d+)?|perl|ruby|node|php)((?-i:\\s+-(?![ceErpm]\\b)[A-Za-z]+|\\s+-[XWIM]\\s+[^\\s|;&)]+))*(\\s+-)?\\s*($|[|;&)\\n])",
       "reason": "piping text into an interpreter runs whatever that text turns out to be"
+    },
+    {
+      "pattern": "\\|\\s*(sudo\\s+)?(python3?(\\.\\d+)?|perl|ruby|node|php)\\b[\\s\\S]*?((?<![\\w.])(exec|eval|compile|__import__)\\s*\\(|\\bos\\.(system|popen|exec\\w*|spawn\\w*)\\b|\\b(subprocess|child_process|execSync|execFileSync|spawnSync|runpy)\\b|(?<![\\w.])system\\s*\\(|\\bqx\\s*[({/])",
+      "reason": "an inline program that executes what is piped into it runs whatever that text turns out to be"
     },
     {
       "pattern": "\\beval\\s+[\\\"']?\\$\\(|\\beval\\s+`",

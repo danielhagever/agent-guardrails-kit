@@ -56,12 +56,22 @@ if not cmd.strip():
 # Commands that must never run from an agent, whatever path they touch.
 # Checked first, on the raw string, so quoting tricks around the path logic
 # cannot route around them. Patterns and reasons live in config.json.
-for rule in cfg.get("deny_patterns", []):
-    try:
-        if re.search(rule["pattern"], cmd, flags=re.IGNORECASE):
-            verdict("deny", f"denied by policy: {rule['reason']}")
-    except (re.error, KeyError) as e:
-        verdict("deny", f"malformed deny_patterns entry in config.json ({e}); failing closed")
+def check_deny_patterns(texts):
+    for text in texts:
+        for rule in cfg.get("deny_patterns", []):
+            try:
+                if re.search(rule["pattern"], text, flags=re.IGNORECASE):
+                    verdict("deny", f"denied by policy: {rule['reason']}")
+            except (re.error, KeyError) as e:
+                verdict("deny", f"malformed deny_patterns entry in config.json ({e}); failing closed")
+
+
+# A command with a heredoc is checked further down, once the bodies have been
+# separated from the command (see split_heredocs): a note written to a file that
+# happens to contain "| sh" is not a pipe into a shell. Nothing between here
+# and there can allow a command.
+if "<<" not in cmd:
+    check_deny_patterns([cmd])
 
 READ_ONLY = set(cfg["read_only_verbs"])
 INTERPRETERS = set(cfg.get("interpreter_verbs", []))
@@ -175,11 +185,43 @@ PUNCT = {";", "|", "||", "&", "&&", "|&", "(", ")", "\n"}
 REDIR = {">", ">>", "<", "<<", ">|", "&>", "&>>", "2>", "2>>"}
 
 
-def lex(text):
-    """Shell tokens with quotes respected. Raises ValueError on bad quoting."""
+def _lex_one(text):
     lx = shlex.shlex(text, posix=True, punctuation_chars=True)
     lx.whitespace_split = True
     return list(lx)
+
+
+def lex(text):
+    """Shell tokens with quotes respected, plus a "\\n" token wherever a newline
+    outside quotes ends a command. Raises ValueError on bad quoting.
+
+    shlex treats a newline as blank space, so a read-only command on one line
+    and a destructive one on the next lexed as ONE simple command whose verb
+    was on the read-only list, and everything after the first line was judged
+    as its arguments. A shell runs each line as a command of its own, so the
+    guard splits there too: lines are gathered until they lex, and a chunk
+    that lexes ends outside every quote, so the newline after it is real.
+    """
+    if "\n" not in text:
+        return _lex_one(text)
+    out, buf, open_quote = [], [], False
+    for line in text.split("\n"):
+        buf.append(line)
+        # inside an open quote, a line with no quote character cannot close it
+        if open_quote and not re.search(r"['\"]", line):
+            continue
+        try:
+            toks = _lex_one("\n".join(buf))
+        except ValueError as e:
+            open_quote = "quotation" in str(e)
+            continue
+        out += toks + ["\n"]
+        buf, open_quote = [], False
+    if buf:
+        out += _lex_one("\n".join(buf))   # raises on an unterminated quote or escape
+    while out and out[-1] == "\n":
+        out.pop()
+    return out
 
 
 
@@ -192,11 +234,42 @@ def ansi_c_decode(token):
     """
     if not token.startswith("$") or "\\" not in token:
         return token
-    body = token[1:]
-    try:
-        return body.encode("utf-8", "surrogateescape").decode("unicode_escape")
-    except (UnicodeDecodeError, UnicodeEncodeError, ValueError):
-        return token
+    # Decoded the way bash does it, byte by byte. Python's unicode_escape was
+    # close but not the same: it printed a DeprecationWarning for escapes bash
+    # simply keeps (`\.`), and that warning became the first line of the reason
+    # a client saw; and it turned UTF-8 into Latin-1, so a non-English path
+    # spelled with \x escapes never matched the policy.
+    body, out, i = token[1:], bytearray(), 0
+    simple = {"a": 7, "b": 8, "e": 27, "E": 27, "f": 12, "n": 10, "r": 13, "t": 9, "v": 11,
+              "\\": 92, "'": 39, '"': 34, "?": 63}
+    while i < len(body):
+        c = body[i]
+        if c != "\\" or i + 1 >= len(body):
+            out += c.encode("utf-8", "surrogateescape")
+            i += 1
+            continue
+        n = body[i + 1]
+        hexes = re.match(r"[0-9A-Fa-f]{1,%d}" % {"x": 2, "u": 4, "U": 8}.get(n, 0), body[i + 2:]) if n in "xuU" else None
+        if n in simple:
+            out.append(simple[n])
+            i += 2
+        elif hexes and n == "x":
+            out.append(int(hexes.group(0), 16))
+            i += 2 + len(hexes.group(0))
+        elif hexes and int(hexes.group(0), 16) <= 0x10FFFF:
+            out += chr(int(hexes.group(0), 16)).encode("utf-8", "surrogatepass")
+            i += 2 + len(hexes.group(0))
+        elif n in "01234567":
+            octal = re.match(r"[0-7]{1,3}", body[i + 1:]).group(0)
+            out.append(int(octal, 8) & 0xFF)
+            i += 1 + len(octal)
+        elif n == "c" and i + 2 < len(body):
+            out.append(ord(body[i + 2]) & 0x1F)
+            i += 3
+        else:
+            out += ("\\" + n).encode("utf-8", "surrogateescape")   # bash keeps it as written
+            i += 2
+    return out.decode("utf-8", "surrogateescape")
 
 
 def _pure_text(inner):
@@ -348,7 +421,12 @@ def glob_reaches(token, vcwd, targets):
             continue
         started = time.monotonic()
         try:
-            for n, hit in enumerate(globmod.iglob(cand, root_dir=vcwd, recursive=True)):
+            # root_dir= only exists from Python 3.10. On the 3.9 that ships with
+            # macOS (/usr/bin/python3) it raised TypeError, and the crash handler
+            # turned that into a DENY for every `ls *.md`. Anchoring the pattern
+            # to the directory does the same walk on every Python 3.
+            anchored = cand if os.path.isabs(cand) else os.path.join(globmod.escape(vcwd), cand)
+            for n, hit in enumerate(globmod.iglob(anchored, recursive=True)):
                 if any(within(resolve(hit, vcwd), p) for p in targets):
                     return True
                 if n > 20_000 or (n % 256 == 0 and time.monotonic() - started > 1.5):
@@ -407,9 +485,20 @@ def script_mentions(path_token, vcwd, seen=None):
     try:
         if os.path.getsize(p) > 256_000:
             return False
+        with open(p, "rb") as fb:
+            head = fb.read(8192)
         with open(p, encoding="utf-8", errors="ignore") as f:
             text = f.read()
     except OSError:
+        return False
+    # A compiled program OUTSIDE the project (/usr/bin/time, a Homebrew ffprobe)
+    # is not a script anyone can read; its bytes happened to contain a guarded
+    # word often enough to refuse `time make`. Inside the project binaries are
+    # still read, because that is where an agent could plant one, and archives
+    # are read wherever they are, because a tar or zip header names the entries
+    # it will unpack.
+    archive = head[:4] in (b"PK\x03\x04", b"PK\x05\x06") or head[257:262] == b"ustar"
+    if b"\x00" in head and not archive and not within(p, cfg["_allowed_tree_abs"]):
         return False
     # Archives and other binaries are read here on purpose (a tar header names
     # its entries in plain text, which is how zip-slip is caught). They also
@@ -417,6 +506,8 @@ def script_mentions(path_token, vcwd, seen=None):
     # the gate died, and a dead gate does not stop the tool call.
     text = text.replace("\x00", " ")
     bases = [vcwd, os.path.dirname(p)]
+    code = p.lower().endswith(CODE_EXTS) or bool(
+        re.match(r"#!\S*(python|node|ruby|perl|php|deno|bun)|#!\S*env\s+(python|node|ruby|perl|php|deno|bun)", text[:120]))
     for line in text.splitlines():
         # a diff names its target as a/path and b/path; git apply strips those,
         # and so must this, or the file it is about to patch is invisible
@@ -428,12 +519,36 @@ def script_mentions(path_token, vcwd, seen=None):
         destructive_line = bool(DESTRUCTIVE_WORDS.search(line))
         for piece in re.split(r"[;&|]+", line):
             for tok in re.findall(r"[^\s'\"]+|'[^']*'|\"[^\"]*\"", piece):
+                if code and _code_noise(tok, destructive_line):
+                    continue
                 if _token_hits(tok, bases, destructive_line):
                     return True
     return False
 
 
-def _scan_text(text, bases):
+CODE_EXTS = (".py", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".rb", ".pl", ".php", ".lua")
+CODE_VERBS = {"python", "python3", "node", "ruby", "perl", "php", "deno", "bun", "tsx", "ts-node", "lua"}
+NAMED_WILDCARD = re.compile(r"[A-Za-z0-9_.-][*?]|[*?][A-Za-z0-9_.-]|[A-Za-z0-9_.-]/[*?]")
+
+
+def _code_noise(tok, destructive_line):
+    """In Python or JavaScript a `*` is usually not a wildcard at all.
+
+    `a * b`, `/** doc */`, `x ** 2` and `count(*)` read as shell globs that
+    "could match" a guarded path, and 246 of 2,500 real commands were refused
+    for it, on lines that destroyed nothing. In code, a wildcard still counts
+    when it is attached to a name (`infra/*`, `*.env`, `sec*`), sits next to a
+    path, is a quoted string that could be a glob pattern, or the line destroys
+    something. Shell text is never treated this way.
+    """
+    if destructive_line or not re.search(r"[*?]", tok):
+        return False
+    if NAMED_WILDCARD.search(tok) or re.search(r"[A-Za-z0-9_.~-]/[A-Za-z0-9_.~-]", tok):
+        return False
+    return tok[:1] not in ("'", '"') or bool(re.search(r"\s", tok))
+
+
+def _scan_text(text, bases, code=False):
     for line in text.splitlines():
         line = line.strip().lstrip("\t")
         if not line or line.startswith("#"):
@@ -441,6 +556,8 @@ def _scan_text(text, bases):
         destructive_line = bool(DESTRUCTIVE_WORDS.search(line))
         for piece in re.split(r"[;&|]+", line):
             for tok in re.findall(r"[^\s'\"]+|'[^']*'|\"[^\"]*\"", piece):
+                if code and _code_noise(tok, destructive_line):
+                    continue
                 if _token_hits(tok, bases, destructive_line):
                     return True
     return False
@@ -721,7 +838,13 @@ def serves_directory(verb, toks):
     returned so the ancestor rule can be applied to it.
     """
     joined = " ".join(toks).lower()
-    hit = any(srv in joined for srv in STATIC_SERVERS)
+    # "serve" is a substring of server, observe and preserve, so `ls -la server`
+    # was refused as a web server exposing the secrets (9 of 2,500 real commands).
+    # The generic word only counts as a whole token (`npx serve`); the specific
+    # names stay substrings, because a server started from inside an inline
+    # program is still a server.
+    words = {os.path.basename(t).lower() for t in toks}
+    hit = "serve" in words or any(srv in joined for srv in STATIC_SERVERS if srv != "serve")
     if verb in ("php",) and "-s" in [t.lower() for t in toks]:
         hit = True
     if verb == "ruby" and "httpd" in joined:
@@ -870,6 +993,14 @@ def runs_file_contents(verb, toks):
     switched off, so the scan is now scoped to commands that actually run,
     unpack or apply what they are given.
     """
+    if verb in ("sed", "gsed", "awk", "gawk", "nawk", "mawk", "jq"):
+        # These run a program only when it comes from a FILE (-f, --file,
+        # --from-file). Every other file they are handed is text to read:
+        # `sed -n '1,200p' notes.md` was refused whenever the notes merely named
+        # a guarded path, and that is how an agent reads part of a file (26 of
+        # 2,500 real commands). The inline program is still judged token by token.
+        return any(t in ("-f", "--file", "--from-file") or t.startswith(("--file=", "--from-file="))
+                   or (verb != "jq" and re.match(r"^-[A-Za-z]*f$", t)) for t in toks[1:])
     if verb in INTERPRETERS:
         return True
     flags = [t for t in toks[1:] if t.startswith("-")]
@@ -1212,6 +1343,114 @@ def alias_built_mid_command(verb, toks, more_follows):
     # single character `$`. Anything the shell will rewrite counts.
     return bool(re.search(r"[$`*?\[]", operands[0]))
 
+
+HEREDOC_WRAPPERS = {"sudo", "doas", "env", "time", "nohup", "nice", "command", "exec", "timeout",
+                    "caffeinate", "stdbuf", "chronic"}
+
+
+def split_heredocs(text):
+    """Separate heredoc bodies from the command before it is lexed.
+
+    `python3 - <<'PY'` and `cat > notes.md <<'EOF'` are how an agent writes a
+    script or a file. A body is not shell, and one apostrophe in it ("don't")
+    made the lexer give up; a guard that cannot parse denies. On 2,500 real
+    commands that was 79 refusals, and most of the slow calls.
+
+    The quote model is shlex's, the same lexer every other check uses: only a
+    `<<` token the lexer itself produced counts, so one inside quotes or a
+    comment is not taken for a heredoc. Anything ambiguous returns the command
+    unchanged and the old rules decide.
+
+    A body is INERT only when `cat` or `tee` writes it to a file, nothing is
+    piped onward, the same command never mentions that file again, and the
+    shell will not execute a substitution inside it (a quoted tag, or no `$(`
+    or backtick in the body). Every other body is a PROGRAM: it is returned,
+    scanned like a script file, and checked against the deny patterns.
+
+    Returns (command without bodies, [(program body, is it Python/JS/... rather than shell)]).
+    """
+    if "<<" not in text:
+        return text, []
+    lines = text.split("\n")
+    kept, programs, start, i = [], [], 0, 0
+    while i < len(lines):
+        if "<<" not in lines[i]:
+            i += 1
+            continue
+        chunk = lines[start:i + 1]
+        try:
+            toks = lex("\n".join(chunk))
+        except ValueError:
+            i += 1          # a quote is still open on this line
+            continue
+        ops = [j for j, t in enumerate(toks) if t == "<<"]
+        if not ops:
+            i += 1          # the << was inside quotes or a comment
+            continue
+        try:
+            last_toks = lex(lines[i])
+        except ValueError:
+            return text, []
+        raw_ops = list(re.finditer(r"(?<!<)<<(-?)[ \t]*(\\?)(['\"]?)([^\s'\";&|<>()]+)\3", lines[i]))
+        if last_toks.count("<<") != len(ops) or len(raw_ops) != len(ops):
+            return text, []
+        kept.extend(chunk)
+        i += 1
+        for j, m in zip(ops, raw_ops):
+            tag, strip_tabs = m.group(4), m.group(1) == "-"
+            if j + 1 >= len(toks) or toks[j + 1].lstrip("-") != tag.lstrip("-"):
+                return text, []
+            body = []
+            while i < len(lines):
+                if (lines[i].lstrip("\t") if strip_tabs else lines[i]) == tag.lstrip("-"):
+                    break
+                body.append(lines[i])
+                i += 1
+            else:
+                return text, []  # no terminator: let the ordinary rules decide
+            i += 1
+            body_text = "\n".join(body)
+            first = max([k for k in range(j) if toks[k] in PUNCT] + [-1]) + 1
+            end = next((k for k in range(j + 1, len(toks)) if toks[k] in PUNCT), len(toks))
+            seg = toks[first:end]
+            words = [w for w in seg if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", w)]
+            while words and (os.path.basename(words[0]) in HEREDOC_WRAPPERS or words[0].startswith("-")
+                             or re.match(r"^\d+[smhd]?$", words[0])):
+                words.pop(0)
+            verb = os.path.basename(words[0]).lower() if words else ""
+            piped_on = end < len(toks) and toks[end] in ("|", "|&")
+            targets = [seg[k + 1] for k in range(len(seg) - 1) if seg[k] in (">", ">>", ">|")]
+            if verb == "tee":
+                targets += [w for w in words[1:] if not w.startswith("-")]
+            expands = not m.group(2) and not m.group(3) and ("$(" in body_text or "`" in body_text)
+            later = "\n".join(lines[i:])
+            reused = any(os.path.basename(t) and os.path.basename(t) in later for t in targets)
+            if not (verb in ("cat", "tee") and targets and not piped_on and not expands and not reused):
+                is_code = not expands and not piped_on and (
+                    verb in CODE_VERBS or bool(re.match(r"python3?(\.\d+)?$", verb))
+                    or (reused and any(t.lower().endswith(CODE_EXTS) for t in targets)))
+                programs.append((body_text, is_code))
+        start = i
+    kept.extend(lines[start:])
+    return "\n".join(kept), programs
+
+
+if "<<" in cmd:
+    cmd, heredoc_programs = split_heredocs(cmd)
+    check_deny_patterns([cmd] + [b for b, _ in heredoc_programs])
+    try:
+        _cd_toks = lex(cmd)
+    except ValueError:
+        _cd_toks = []
+    # `cd infra && python3 - <<'PY'` resolves the body's relative paths from
+    # the directory the command moved to, so every directory it names is a base.
+    _bases = [session_cwd] + [os.path.normpath(os.path.join(session_cwd, os.path.expanduser(_cd_toks[k + 1])))
+                              for k in range(len(_cd_toks) - 1) if _cd_toks[k] in ("cd", "pushd")]
+    for _body, _code in heredoc_programs:
+        if _scan_text(_body, _bases, code=_code):
+            verdict("deny", "a heredoc this command runs (fed to an interpreter or a shell, piped onward, "
+                            "or written to a file the same command then uses) references a protected or "
+                            "secret path")
 
 expanded = preexpand(cmd)
 if expanded != cmd:

@@ -53,16 +53,25 @@ def probe(matcher, command):
     tool, payload = PROBE[key]
     if payload is None:
         return "no secret_paths declared, nothing to probe with"
-    path = command.replace("$CLAUDE_PROJECT_DIR", repo).replace("${CLAUDE_PROJECT_DIR}", repo)
+    path = (command.replace('"$CLAUDE_PROJECT_DIR"', repo).replace('"${CLAUDE_PROJECT_DIR}"', repo)
+            .replace("$CLAUDE_PROJECT_DIR", repo).replace("${CLAUDE_PROJECT_DIR}", repo))
     if not os.path.exists(path):
         return f"**MISSING**: {path} does not exist"
     if not os.access(path, os.X_OK):
         return f"**NOT EXECUTABLE**: chmod +x {path}"
     body = json.dumps({"tool_name": tool, "cwd": repo, "tool_input": payload})
+    # Run the command the way Claude Code does: through a shell, with the
+    # variable set. Substituting the path and running it directly reported
+    # "refused the probe" for a hook that exits 127 in production, because an
+    # unquoted $CLAUDE_PROJECT_DIR splits on a space in the repository path.
     try:
-        p = subprocess.run([path], input=body, capture_output=True, text=True, timeout=30)
+        p = subprocess.run(["/bin/sh", "-c", command], input=body, capture_output=True, text=True,
+                           timeout=30, cwd=repo, env=dict(os.environ, CLAUDE_PROJECT_DIR=repo))
     except (OSError, subprocess.SubprocessError) as e:
         return f"**COULD NOT RUN**: {e}"
+    if p.returncode == 127 and " " in repo and '"$CLAUDE_PROJECT_DIR"' not in command:
+        return ("**BROKEN BY A SPACE**: the repository path contains a space and this command does "
+                "not quote the variable; write it as \"$CLAUDE_PROJECT_DIR\"/... in settings.json")
     if p.returncode == 2:
         return "refused the probe (exit 2)"
     return f"**ALLOWED THE PROBE** (exit {p.returncode}), which means this hook is not protecting anything"

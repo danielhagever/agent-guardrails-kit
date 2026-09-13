@@ -841,6 +841,63 @@ if [ -z "${HOOKS_LAB_NESTED:-}" ]; then
   rm -rf "$REF"
 fi
 
+# --- installer (round 12) ---
+# A repository path with a space made every installed hook exit 127: an
+# unquoted $CLAUDE_PROJECT_DIR splits, and 127 is not a block. Five guards did
+# nothing while settings.json looked complete, and the delivery report said all
+# was well because it ran each hook by path instead of through a shell.
+if [ -z "$HOOKS_LAB_NESTED" ]; then
+  echo ""
+  echo "  installer:"
+  INS="$LAB/scratch/installer"; rm -rf "$INS"; mkdir -p "$INS/my repo/infra/prod" "$INS/bad/.claude" "$INS/po" "$INS/up/.claude"
+  printf 'x\n' > "$INS/my repo/infra/prod/a.txt"
+  "$LAB/install.sh" "$INS/my repo" .env infra/prod >/dev/null 2>&1; check "install into a path with a space" 0 $?
+  BH=$(python3 -c 'import json,sys; s=json.load(open(sys.argv[1])); print([h["command"] for m in s["hooks"]["PreToolUse"] for h in m["hooks"] if "pre_bash_guard" in h["command"]][0])' "$INS/my repo/.claude/settings.json")
+  hook_run() { printf '{"tool_name":"Bash","cwd":"%s","tool_input":{"command":"%s"}}' "$INS/my repo" "$1" \
+    | (cd "$INS/my repo" && CLAUDE_PROJECT_DIR="$INS/my repo" sh -c "$BH") >/dev/null 2>&1; }
+  hook_run "ls"; check "the settings.json command runs through a shell in that path (ls allowed)" 0 $?
+  hook_run "rm infra/prod/a.txt"; check "the settings.json command refuses in that path" 2 $?
+  printf '%s' '{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"$CLAUDE_PROJECT_DIR/guardrails/hooks/pre_bash_guard.sh"}]}]}}' > "$INS/up/.claude/settings.json"
+  "$LAB/install.sh" "$INS/up" .env >/dev/null 2>&1
+  python3 -c 'import json,sys; c=[h["command"] for m in json.load(open(sys.argv[1]))["hooks"]["PreToolUse"] for h in m["hooks"] if "pre_bash_guard" in h["command"]]; sys.exit(0 if c == ["\"$CLAUDE_PROJECT_DIR\"/guardrails/hooks/pre_bash_guard.sh"] else 1)' "$INS/up/.claude/settings.json"
+  check "an old unquoted hook entry is rewritten, not duplicated" 0 $?
+  printf '{"model": "x",}' > "$INS/bad/.claude/settings.json"
+  "$LAB/install.sh" "$INS/bad" .env >/dev/null 2>&1; check "invalid settings.json is refused" 2 $?
+  [ ! -e "$INS/bad/guardrails" ]; check "and nothing is left behind to block the second attempt" 0 $?
+  "$LAB/install.sh" "$INS/po" .env --print-only >/dev/null 2>&1
+  [ ! -e "$INS/po/.claude/settings.json" ] && ! grep -q -- "--print-only" "$INS/po/guardrails/config.json"
+  check "--print-only works in any position and is never a protected path" 0 $?
+  rm -rf "$INS"
+fi
+
+# --- python versions (round 12) ---
+# For eleven rounds the gates ran only on the developer's Homebrew Python.
+# /usr/bin/python3 on macOS is 3.9, where glob(root_dir=) does not exist, and
+# the crash handler turned that into a DENY for every command with a wildcard.
+# Every Python 3.9+ this machine has runs the same ordinary commands here, and a
+# broken python3 first on PATH must be skipped, not trusted.
+echo ""
+echo "  python versions:"
+PYC="$LAB/scratch/pycompat"; rm -rf "$PYC"; mkdir -p "$PYC/bin" "$PYC/old"
+printf '#!/bin/sh\nexit 1\n' > "$PYC/old/python3"; chmod +x "$PYC/old/python3"
+chosen=$(PATH="$PYC/old:$PATH" "$LAB/hooks/_python.sh" 2>/dev/null)
+[ "$chosen" != "python3" ]; check "_python.sh skips a python3 that is not Python 3.9+" 0 $?
+seen_versions=""
+for py in /usr/bin/python3 $(command -v python3.9 python3.10 python3.11 python3.12 python3.13 python3.14 python3 2>/dev/null); do
+  [ -x "$py" ] || continue
+  "$py" -S -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)' 2>/dev/null || continue
+  ver=$("$py" -S -c 'import sys; print("%d.%d" % sys.version_info[:2])')
+  case " $seen_versions " in *" $ver "*) continue ;; esac
+  seen_versions="$seen_versions $ver"
+  ln -sf "$py" "$PYC/bin/python3"
+  for c in 'ls *.md' 'wc -l gates/*.py' 'rm -f scratch/*.tmp'; do
+    printf '{"tool_name":"Bash","cwd":"%s","tool_input":{"command":"%s"}}' "$LAB" "$c" \
+      | PATH="$PYC/bin:$PATH" "$LAB/hooks/pre_bash_guard.sh" >/dev/null 2>&1
+    check "python $ver allows an ordinary wildcard: $c" 0 $?
+  done
+done
+rm -rf "$PYC"
+
 # The red team executes every attack in a sandbox and compares the verdict with
 # what happened on disk. Skipped in nested runs (the interrupt test re-enters).
 if [ -z "$HOOKS_LAB_NESTED" ] && [ -z "$SKIP_REDTEAM" ]; then

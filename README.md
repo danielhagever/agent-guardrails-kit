@@ -2,7 +2,7 @@
 
 Fail-closed guardrails for Claude Code (and any agent that runs shell commands and edits files through hooks). Five PreToolUse hooks, one policy file, an audit log, a real-time alert on every block, a monthly report, an exposure report for the setup you have today, CI templates that prove the policy on every push, and a test suite that proves every block.
 
-    ./tests/run_tests.sh      # 286 assertions, all green
+    ./tests/run_tests.sh      # 303 assertions, all green
 
 Built after an evening of breaking my own deny-list. The story is in the [write-up](https://agent-guardrails.meshulam791.workers.dev/), the short version is below.
 
@@ -60,7 +60,7 @@ An agent that can delete the guard is not guarded. `self_protect` (on by default
 
 ## The red team: measured, not claimed
 
-    python3 redteam/attack.py      # 373 attacks, 0 leaks
+    python3 redteam/attack.py      # 400 attacks, 0 leaks (also with --shell /bin/zsh and --shell /bin/bash)
 
 Every other test here asks the guard for a verdict and believes it. This one builds a throwaway sandbox with a canary in a protected path and a fake credential in a secret path, asks the guard, **runs the command anyway**, and compares the two. Four outcomes, all counted:
 
@@ -265,6 +265,20 @@ All of these are denied **only when a declared secret is actually tracked**, whi
 
 Underneath two of those sat the same bug in different clothes: a scanned file (a recipe, a lifecycle script) was read with the rules from round three and not the ones from round ten, so `rm -rf infra` inside a Justfile was invisible for exactly the reason it had been invisible on the command line. And a declared path that is itself a symlink was guarded only where it pointed, so `rm -rf infra` removed the link while the guard watched the target.
 
+Round twelve changed what the tests were made of, twice: the shell that runs them, and where the commands come from.
+
+**The shell the client runs.** Every earlier round ran each attack under `/bin/sh`. Claude Code on a Mac runs the user's shell, which is zsh, and a Linux CI box runs bash. `redteam/attack.py --shell /bin/zsh` (or `/bin/bash`) runs the same attacks the way a client's machine would.
+
+**A newline was a space.** The lexer treats a line break as blank space, so a command whose first line started with a read-only verb (`ls`, `cat`, `echo`) turned every later line into arguments of that verb. A destructive command on line two was allowed by the committed kit, while the same command after a `;` was refused, and the commands an agent sends are often several lines long. The guard now splits at every newline outside quotes, the way a shell does.
+
+**The installed copy, not the lab.** Installed into a repository whose path contains a space (`~/My Projects/app`), every hook exited 127: an unquoted `$CLAUDE_PROJECT_DIR` splits, and 127 is not a block, so all five guards did nothing while `settings.json` looked complete. The delivery report said they refused, because it ran each hook by its path instead of through a shell the way Claude Code does. The installer writes `"$CLAUDE_PROJECT_DIR"` now and rewrites an older unquoted entry in place; the report runs each hook through a shell and names this failure when it sees it.
+
+**Python 3.9.** `/usr/bin/python3` on a Mac without Homebrew is 3.9, where `glob(root_dir=)` does not exist, so every command with a wildcard crashed the gate and was refused. The hooks pick the first Python 3.9 or newer on PATH, and the suite runs the same commands on every Python it finds.
+
+**Measured on real work.** The lab's "0 benign commands wrongly blocked" is a count over ordinary commands someone wrote down. So the guard was also asked, without running anything, about 2,500 real Bash commands from months of Claude Code sessions, with the kit installed into a client-shaped repository (`infra/prod`, `.env`, `cfg/.env`). The committed kit refused 14.0% of them. The causes, largest first: `curl ... | python3 -c "import json..."` was refused although the program is in `-c` and the pipe only carries data; a heredoc body (`python3 - <<'PY'`, `cat > file <<'EOF'`) with a single apostrophe made the lexer give up; in Python or JavaScript, `a * b`, `/** doc */` and `count(*)` were read as shell wildcards that might reach a guarded path; `sed -n '1,200p' file` was treated as running the file; system binaries were scanned as if they were scripts; and "serve" matched inside "server". After the fixes, the same 2,500 commands are refused 6.2% of the time. Heredoc bodies are separated before lexing and judged by what they are: a body fed to an interpreter or a shell, piped onward, written to a file the same command then uses, or carrying a substitution is still scanned as a program, and the red team attacks each of those shapes. What remains is listed rather than hidden: f-strings and regular expressions in code whose braces and brackets still look like patterns, glob strings such as `"*/README.md"` that are kept on purpose, and deliberate refusals such as writes under `~/.claude` or reading a token file.
+
+**Smaller ones.** The installer created `guardrails/` before discovering that `settings.json` was invalid JSON, leaving a half install the next run refused to touch; `--print-only` worked only as the first argument, and was also written into the policy as a protected path; an absolute path was stored absolute and would not match after a clone. A Python warning from the `$'...'` decoder became the first line of the reason a client saw, and the decoder turned UTF-8 into Latin-1; it now decodes byte for byte the way bash does.
+
 
 ## MCP tools are a second set of hands
 
@@ -297,7 +311,9 @@ Three more lessons, all found by attacking rather than reading:
 
     ./install.sh /path/to/your/repo .env secrets infra/prod
 
-This copies `hooks/`, `gates/`, `care/`, `ci/`, `templates/`, `docs/` and a rewritten `config.json` into `your-repo/guardrails/`, protects the paths you list (relative to the repo root), and prints the `.claude/settings.json` block to add. Then:
+Requires Python 3.9 or newer (the `/usr/bin/python3` that ships with macOS is enough); the hooks pick the first Python 3.9+ on PATH and refuse to run on anything older.
+
+This copies `hooks/`, `gates/`, `care/`, `ci/`, `templates/`, `docs/` and a rewritten `config.json` into `your-repo/guardrails/`, protects the paths you list (relative to the repo root), and merges the five hooks into `.claude/settings.json` (existing keys kept, a `.before-guardrails` backup beside it; `--print-only` prints the block instead). Then:
 
     cd /path/to/your/repo && guardrails/tests/smoke.sh
 
@@ -312,7 +328,7 @@ Eleven assertions against the installed policy. Wire the same command into CI an
     ci/                    GitHub Actions and GitLab CI templates
     templates/             cursor-rules.mdc, settings-mcp-allowlist.json
     docs/                  CONTROL-MAPPING.md, AGENT-SAFETY-STACK.md, DEVELOPERS.md
-    tests/run_tests.sh     the lab suite (286 assertions); tests/smoke.sh for installed copies
+    tests/run_tests.sh     the lab suite (303 assertions); tests/smoke.sh for installed copies
     .claude/settings.json  the five PreToolUse hooks (Bash, writes, reads, MCP, catch-all)
 
 `stop_gate.sh` is an optional Stop hook that refuses to end a session until a named deliverable exists and has real content. It is tested but not wired by default.
@@ -330,7 +346,7 @@ This kit is not impenetrable and nothing that runs inside the agent's own proces
 - **Writes outside the repository from a shell command.** The Write and Edit tools are confined to the allowed tree; a Bash command is judged on the paths the policy declares, so `echo x > /tmp/scratch` is allowed on purpose. The files outside the repository that decide what runs later (`~/.claude/settings.json`, shell rc files, `~/.gitconfig`, `~/.ssh/config`, LaunchAgents) are in `home_execution_surface` and denied; everything else in the home directory is not.
 - **A compromised host.** These are hooks, not a sandbox. Unattended runs belong in a container with no network path to production.
 - **Server-side truth.** A force push blocked on the laptop is still worth blocking on the server: branch protection and a pre-receive hook are the copy that survives a bypassed client.
-- **Unknown unknowns.** 373 attacks and 78 tool cases pass today. The number of attacks nobody has written yet is not zero, which is why `redteam/attack.py` is in the repo and why a working bypass is welcome as an issue.
+- **Unknown unknowns.** 400 attacks under sh, bash and zsh, and 78 tool cases, pass today. The number of attacks nobody has written yet is not zero, which is why `redteam/attack.py` is in the repo and why a working bypass is welcome as an issue.
 
 The honest claim is narrow: inside Claude Code, on the paths you declare, the guard fails closed, refuses what it cannot parse, protects its own files, and every claim in this README is a test you can run.
 
